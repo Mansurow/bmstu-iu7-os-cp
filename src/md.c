@@ -8,10 +8,6 @@
 #include <linux/version.h>
 #include <linux/namei.h>
 
-#include <linux/ftrace.h>
-#include <linux/kallsyms.h>
-#include <linux/kprobes.h>
-
 #include <linux/sched/signal.h>
 
 #include <linux/types.h>
@@ -22,63 +18,40 @@
 #include <linux/vmalloc.h>
 #include <linux/proc_fs.h>
 
+#include "hooks.h"
+
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Mansurov Vladislav");
 MODULE_DESCRIPTION("MONITORING PROCCESS");
 MODULE_VERSION("1.0");
 
-#define PREFIX        "[MONITORING]"
-#define FORTUNEPREFIX "[FORTUNE]"
-#define GENERALPREFIX "[GENERAL]"
-#define SIGNALPREFIX  "[SIGNAL]"
-#define SEMPREFIX     "[SEMAFORE]"
-#define SHMPREFIX     "[SHM]"
-#define PIPEPREFIX    "[PIPE]"
+#define MAINDIRNAME  "monitoring"
+#define LOGSDIRNAME  "logs"
+#define PIDDIRNAME   "pid"
 
-#define PID_MAX 4194304
-#define LOG_SIZE 262144
+#define GENERALFILENAME  "general"
+#define SIGNALFILENAME   "signals"
+#define SIGHANDFILENAME  "sighands"
+#define SEMFILENAME      "sem"
+#define SHMFILENAME      "shm"
+#define PIPEFILENAME     "pipe"
+#define MEMORYFILENAME   "memory"
+#define MAPSFILENAME     "maps"
 
-// TODO: добавить папку для вывода сигналов, семафоров... для каждого pid отдельно...
-#define FILENAME "signals"
-#define DIRNAME  "monitoring"
-#define FILEPATH DIRNAME "/" FILENAME
+static struct proc_dir_entry *proc_main_dir = NULL;
+static struct proc_dir_entry *proc_logs_dir = NULL;
+static struct proc_dir_entry *proc_pid_dir = NULL;
 
-static struct proc_dir_entry *proc_file = NULL;
-static struct proc_dir_entry *proc_dir = NULL;
-
-struct monitoring_signal_struct
-{
-    int count_received; // количество полученных сигналов
-    int count_sent; // количество отправленных сигналов  
-};
-
-struct monitoring_task_struct
-{
-    struct monitoring_signal_struct m_signal[_NSIG];
-};
-
-static struct monitoring_task_struct mtasks[PID_MAX];
-
-static const char *signal_names[] = {
-    "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP",
-    "SIGABRT", "SIGBUS", "SIGFPE", "SIGKILL", "SIGUSR1",
-    "SIGSEGV", "SIGUSR2", "SIGPIPE", "SIGALRM", "SIGTERM",
-    "SIGSTKFLT", "SIGCHLD", "SIGCONT", "SIGSTOP", "SIGTSTP",
-    "SIGTTIN", "SIGTTOU", "SIGURG", "SIGXCPU", "SIGXFSZ",
-    "SIGVTALRM", "SIGPROF", "SIGWINCH", "SIGIO", "SIGPWR",
-    "SIGSYS",  "", "", "SIGRTMIN", "SIGRTMIN+1", "SIGRTMIN+2", "SIGRTMIN+3",
-    "SIGRTMIN+4", "SIGRTMIN+5", "SIGRTMIN+6", "SIGRTMIN+7", "SIGRTMIN+8",
-    "SIGRTMIN+9", "SIGRTMIN+10", "SIGRTMIN+11", "SIGRTMIN+12", "SIGRTMIN+13",
-    "SIGRTMIN+14", "SIGRTMIN+15", "SIGRTMAX-14", "SIGRTMAX-13", "SIGRTMAX-12",
-    "SIGRTMAX-11", "SIGRTMAX-10", "SIGRTMAX-9", "SIGRTMAX-8", "SIGRTMAX-7",
-    "SIGRTMAX-6", "SIGRTMAX-5", "SIGRTMAX-4", "SIGRTMAX-3", "SIGRTMAX-2",
-    "SIGRTMAX-1", "SIGRTMAX",
-};
-
-
-static char log[LOG_SIZE] = { "HELLO WORLD!\n" };
+static struct proc_dir_entry *proc_general_file = NULL;
+static struct proc_dir_entry *proc_signal_logs_file = NULL;
+static struct proc_dir_entry *proc_signal_file = NULL;
+static struct proc_dir_entry *proc_memory_file = NULL;
 
 static pid_t target_pid = 20403;
+
+static char general_info[LOG_SIZE] = { 0 };
+static char sighand_info[LOG_SIZE] = { 0 };
+static char memory_info[LOG_SIZE] = { 0 };
 
 static int check_overflow(char *fString, char *sString, int maxSize)
 {
@@ -92,20 +65,6 @@ static int check_overflow(char *fString, char *sString, int maxSize)
     }
 
     return 0;
-}
-
-static void init_mtasks(void)
-{
-    int pid;
-
-    for (pid = 0; pid < PID_MAX; ++pid) {
-        int signo;
-
-        for (signo = 0; signo < _NSIG; ++signo) {
-            mtasks[pid].m_signal[signo].count_received = 0;
-            mtasks[pid].m_signal[signo].count_sent = 0;
-        }
-    }
 }
 
 static void print_sem(struct task_struct *task)
@@ -235,37 +194,94 @@ static void print_info_mm(pid_t pid, struct mm_struct *info_about_mem)
     // }
 }
 
-static void print_signal_info(int signo, struct k_sigaction *ka) {
+static ssize_t show_sighand_info(void) {
 
-    int index = signo - 1;
-    if (ka->sa.sa_handler == SIG_DFL) 
+    int strlen = 0;
+
+    strlen += sprintf(sighand_info + strlen, "%7s\t%14s\t%8s\t%7s\t%7s\n", "PID", "SIGNAL", "FLAGS", "HANDLER");
+
+    struct task_struct *task = &init_task;
+
+    do 
     {
-        pr_info("Default action for signal %d (%s)\n", signo, signal_names[index]);
-    } 
-    else if (ka->sa.sa_handler == SIG_IGN) 
-    {
-        pr_info("Signal %d (%s) ignored\n", signo), signal_names[index];
-    } 
-    else 
-    {
-        pr_info("Custom handler for signal %d (%s)\n", signo, signal_names[index]);
-        // pr_info("Handler Address: 0x%lx\n", (unsigned long)ka->sa.sa_handler);
-        // pr_info("Flags: %ld\n", ka->sa.sa_flags);
+        for (int signo = 1; signo < _NSIG; ++signo) {
+            struct k_sigaction *ka = &task->sighand->action[signo - 1];
+
+            char status;
+
+            // if (ka->sa.sa_handler == SIG_DFL) 
+            // {
+            //     status = 'D';
+            //     strlen += sprintf(sighand_info + strlen, "%7d\t%14s\t%8s\t%7s\t0x%x\n", 
+            //          task->pid, signal_names[signo], "Default", "?", ka->sa.sa_handler);
+            // } 
+            // else if (ka->sa.sa_handler == SIG_IGN) 
+            // {
+            //     strlen += sprintf(sighand_info + strlen, "%7d\t%14s\t%8s\t%7s\t%s\n", 
+            //         task->pid, signal_names[signo], "Ignore", "?", "?");                
+            // } 
+            if (ka->sa.sa_handler > 1)
+            {
+                status = 'C';
+                strlen += sprintf(sighand_info + strlen, "%7d\t%14s\t%7lld\t0x%x\n", 
+                    task->pid, signal_names[signo], ka->sa.sa_flags, ka->sa.sa_handler);
+            }
+        }
     }
+    while ((task = next_task(task)) != &init_task);
+
+    return strlen;
 }
 
-static void print_general_info(struct task_struct *task)
+static ssize_t show_memory_info(void) {
+    int strlen = 0;
+
+    strlen += sprintf(memory_info + strlen, "%7s %7s %10s %10s %10s %10s %10s %7s %10s %10s %10s %10s %10s\n", 
+        "PID", "MMUSERS", "TOTAL VM", "LOCKED VM", "DATA VM", "EXEC VM", "STACK VM", "MAPS", "HEAP", "CODE", "DATA", "ARGS", "ENV");
+
+    struct task_struct *task = &init_task;
+
+    do 
+    {
+        struct mm_struct *mm = task->mm;
+
+        if (mm != NULL)
+        {
+            unsigned long brk = mm->brk - mm->start_brk; 
+            unsigned long code = mm->end_code - mm->start_code;   
+            unsigned long data = mm->end_data - mm->start_data;
+            unsigned long args = mm->arg_end - mm->arg_start;
+            unsigned long env = mm->env_end - mm->env_start;
+
+            strlen += sprintf(memory_info + strlen, "%7d %7d %10lu %10lu %10lu %10lu %10lu %7d %10lu %10lu %10lu %10lu %10lu\n", 
+                task->pid, mm->mm_users.counter, mm->total_vm, mm->locked_vm, mm->data_vm, mm->exec_vm, mm->stack_vm, mm->map_count, brk, code, data, args, env);
+        }
+    }
+    while ((task = next_task(task)) != &init_task);
+
+    return strlen;
+}
+
+static ssize_t show_general_info(void)
 {
-    pr_info("%s[GENERAL]: " 
-            "pid: %d, ppid: %d, pgid: %d, name: %s\nprio: %d, static prio: %d, normal prio: %d, realtime_prio: %d\n"
-            "delay: %lld\n"
-            "utime: %lld ticks, stime: %lld ticks\n"
-            "Sched_rt_entity: timeout: %ld, watchdog_stamp: %ld, time_slice:%ld\n", 
-            PREFIX,
-            task->pid, task->parent->pid, task->group_leader->pid, task->comm,
-            task->prio, task->static_prio, task->normal_prio, task->rt_priority,
-            task->sched_info.run_delay, task->utime, task->stime,
-            task->rt.watchdog_stamp, task->rt.time_slice);
+    int strlen = 0;
+
+    strlen += sprintf(general_info + strlen, "%7s\t%7s\t%7s\t%7s\t%10s\t%7s\t%7s\t%7s\t%7s\t%7s\t%14s\t%14s\t%14s\t%7s\n", 
+        "PPID", "PID", "STATE", "ESTATE", "FLAGS", "POLICY", "PRIO", "SPRIO", "NPRIO", "PRPRIO", "UTIME", "STIME", "DELAY", "COMM");
+
+    struct task_struct *task = &init_task;
+
+    do 
+    {
+        strlen += sprintf(general_info + strlen, "%7d\t%7d\t%7d\t%7d\t%10x\t%7d\t%7d\t%7d\t%7d\t%7d\t%14ld\t%14ld\t%14ld\t%s\n",
+                        task->parent->pid, task->pid, task->__state, task->exit_state, task->flags,
+                        task->policy, task->prio, task->static_prio, task->normal_prio, task->rt_priority,
+                        task->utime, task->stime, task->sched_info.run_delay,
+                        task->comm);  
+    }
+    while ((task = next_task(task)) != &init_task);
+
+    return strlen;
 } 
 
 static void print_signals(struct task_struct *task)
@@ -286,311 +302,132 @@ static void print_signals(struct task_struct *task)
     }
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
-static unsigned long lookup_name(const char *name)
+
+static int general_open(struct inode *spInode, struct file *spFile)
 {
-	struct kprobe kp = {
-		.symbol_name = name
-	};
-	unsigned long retval;
-
-	if (register_kprobe(&kp) < 0) return 0;
-	retval = (unsigned long) kp.addr;
-	unregister_kprobe(&kp);
-	return retval;
-}
-#else
-static unsigned long lookup_name(const char *name)
-{
-	return kallsyms_lookup_name(name);
-}
-#endif
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
-#define FTRACE_OPS_FL_RECURSION FTRACE_OPS_FL_RECURSION_SAFE
-#endif
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
-#define ftrace_regs pt_regs
-
-static __always_inline struct pt_regs *ftrace_get_regs(struct ftrace_regs *fregs)
-{
-	return fregs;
-}
-#endif
-
-/*
- * There are two ways of preventing vicious recursive loops when hooking:
- * - detect recusion using function return address (USE_FENTRY_OFFSET = 0)
- * - avoid recusion by jumping over the ftrace call (USE_FENTRY_OFFSET = 1)
- */
-#define USE_FENTRY_OFFSET 0
-
-/**
- * struct ftrace_hook - describes a single hook to install
- *
- * @name:     name of the function to hook
- *
- * @function: pointer to the function to execute instead
- *
- * @original: pointer to the location where to save a pointer
- *            to the original function
- *
- * @address:  kernel address of the function entry
- *
- * @ops:      ftrace_ops state for this function hook
- *
- * The user should fill in only &name, &hook, &orig fields.
- * Other fields are considered implementation details.
- */
-struct ftrace_hook {
-	const char *name;
-	void *function;
-	void *original;
-
-	unsigned long address;
-	struct ftrace_ops ops;
-};
-
-static int fh_resolve_hook_address(struct ftrace_hook *hook)
-{
-	hook->address = lookup_name(hook->name);
-
-	if (!hook->address) {
-		pr_debug("unresolved symbol: %s\n", hook->name);
-		return -ENOENT;
-	}
-
-#if USE_FENTRY_OFFSET
-	*((unsigned long*) hook->original) = hook->address + MCOUNT_INSN_SIZE;
-#else
-	*((unsigned long*) hook->original) = hook->address;
-#endif
-
-	return 0;
-}
-
-static void notrace fh_ftrace_thunk(unsigned long ip, unsigned long parent_ip,
-		struct ftrace_ops *ops, struct ftrace_regs *fregs)
-{
-	struct pt_regs *regs = ftrace_get_regs(fregs);
-	struct ftrace_hook *hook = container_of(ops, struct ftrace_hook, ops);
-
-#if USE_FENTRY_OFFSET
-	regs->ip = (unsigned long)hook->function;
-#else
-	if (!within_module(parent_ip, THIS_MODULE))
-		regs->ip = (unsigned long)hook->function;
-#endif
-}
-
-/**
- * fh_install_hooks() - register and enable a single hook
- * @hook: a hook to install
- *
- * Returns: zero on success, negative error code otherwise.
- */
-int fh_install_hook(struct ftrace_hook *hook)
-{
-	int err;
-
-	err = fh_resolve_hook_address(hook);
-	if (err)
-		return err;
-
-	/*
-	 * We're going to modify %rip register so we'll need IPMODIFY flag
-	 * and SAVE_REGS as its prerequisite. ftrace's anti-recursion guard
-	 * is useless if we change %rip so disable it with RECURSION.
-	 * We'll perform our own checks for trace function reentry.
-	 */
-	hook->ops.func = fh_ftrace_thunk;
-	hook->ops.flags = FTRACE_OPS_FL_SAVE_REGS
-	                | FTRACE_OPS_FL_RECURSION
-	                | FTRACE_OPS_FL_IPMODIFY;
-
-	err = ftrace_set_filter_ip(&hook->ops, hook->address, 0, 0);
-	if (err) {
-		pr_debug("ftrace_set_filter_ip() failed: %d\n", err);
-		return err;
-	}
-
-	err = register_ftrace_function(&hook->ops);
-	if (err) {
-		pr_debug("register_ftrace_function() failed: %d\n", err);
-		ftrace_set_filter_ip(&hook->ops, hook->address, 1, 0);
-		return err;
-	}
-
-	return 0;
-}
-
-/**
- * fh_remove_hooks() - disable and unregister a single hook
- * @hook: a hook to remove
- */
-void fh_remove_hook(struct ftrace_hook *hook)
-{
-	int err;
-
-	err = unregister_ftrace_function(&hook->ops);
-	if (err) {
-		pr_debug("unregister_ftrace_function() failed: %d\n", err);
-	}
-
-	err = ftrace_set_filter_ip(&hook->ops, hook->address, 1, 0);
-	if (err) {
-		pr_debug("ftrace_set_filter_ip() failed: %d\n", err);
-	}
-}
-
-/**
- * fh_install_hooks() - register and enable multiple hooks
- * @hooks: array of hooks to install
- * @count: number of hooks to install
- *
- * If some hooks fail to install then all hooks will be removed.
- *
- * Returns: zero on success, negative error code otherwise.
- */
-int fh_install_hooks(struct ftrace_hook *hooks, size_t count)
-{
-	int err;
-	size_t i;
-
-	for (i = 0; i < count; i++) {
-		err = fh_install_hook(&hooks[i]);
-		if (err)
-			goto error;
-	}
-
-	return 0;
-
-error:
-	while (i != 0) {
-		fh_remove_hook(&hooks[--i]);
-	}
-
-	return err;
-}
-
-/**
- * fh_remove_hooks() - disable and unregister multiple hooks
- * @hooks: array of hooks to remove
- * @count: number of hooks to remove
- */
-void fh_remove_hooks(struct ftrace_hook *hooks, size_t count)
-{
-	size_t i;
-
-	for (i = 0; i < count; i++)
-		fh_remove_hook(&hooks[i]);
-}
-
-#ifndef CONFIG_X86_64
-#error Currently only x86_64 architecture is supported
-#endif
-
-#if defined(CONFIG_X86_64) && (LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0))
-#define PTREGS_SYSCALL_STUBS 1
-#endif
-
-/*
- * Tail call optimization can interfere with recursion detection based on
- * return address on the stack. Disable it to avoid machine hangups.
- */
-#if !USE_FENTRY_OFFSET
-#pragma GCC optimize("-fno-optimize-sibling-calls")
-#endif
-
-#if defined(CONFIG_X86_64) && (LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0))
-#define PTREGS_SYSCALL_STUBS 1
-#endif
-
-#ifdef PTREGS_SYSCALL_STUBS
-static asmlinkage long (*real_sys_kill)(const struct pt_regs *);
-
-static asmlinkage int hook_sys_kill(const struct pt_regs *regs)
-{
-    pid_t pid = regs->di;
-    int sig = regs->si;
-
-    // mtasks[current->pid].m_signal[signo].count_sent++;
-    // mtasks[pid].m_signal[signo].count_received++;
-
-    real_sys_kill(regs);
-    return 0;
-}
-#else
-static asmlinkage long (*real_sys_kill)(pid_t pid, int sig);
-
-static asmlinkage int hook_sys_kill(pid_t pid, int sig)
-{
-    printk(KERN_INFO "Сигнал отправлен %d (%s) процессу %d\n", sig, signal_names[sig], pid);
-
-    real_sys_kill(pid, sig);
-    return 0;
-}
-#endif
-
-/*
- * x86_64 kernels have a special naming convention for syscall entry points in newer kernels.
- * That's what you end up with if an architecture has 3 (three) ABIs for system calls.
- */
-#ifdef PTREGS_SYSCALL_STUBS
-#define SYSCALL_NAME(name) ("__x64_" name)
-#else
-#define SYSCALL_NAME(name) (name)
-#endif
-
-#define HOOK(_name, _function, _original)   \
-{                                               \
-    .name = SYSCALL_NAME(_name),                \
-    .function = (_function),                    \
-    .original = (_original),                    \
-}
-
-static struct ftrace_hook hooks[] = {
-    HOOK("sys_kill",  hook_sys_kill,  &real_sys_kill),
-};
-
-
-static int monitoring_open(struct inode *spInode, struct file *spFile)
-{
-    printk(KERN_INFO "fortune: open called\n");
-    return 0;
-}
-
-
-static int monitoring_release(struct inode *spInode, struct file *spFile)
-{
-    printk(KERN_INFO "fortune: release called\n");
-    return 0;
-}
-
-
-static ssize_t monitoring_write(struct file *file, const char __user *buf, size_t len, loff_t *fPos)
-{
-    printk(KERN_INFO "fortune: write called\n");
+    pr_info("%s%s: general_open called\n", PREFIX, FORTUNEPREFIX);
 
     return 0;
 }
 
-
-static ssize_t monitoring_read(struct file *file, char __user *buf, size_t len, loff_t *fPos)
+static int general_release(struct inode *spInode, struct file *spFile)
 {
+    pr_info("%s%s: general_release called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static ssize_t general_write(struct file *file, const char __user *buf, size_t len, loff_t *fPos)
+{
+    pr_info("%s%s: general_write called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static ssize_t general_read(struct file *file, char __user *buf, size_t len, loff_t *fPos)
+{
+    pr_info("%s%s: general_read called\n", PREFIX, FORTUNEPREFIX);
+
     if (*fPos > 0)
         return 0;
 
-    printk(KERN_INFO "fortune: read called\n");
+    ssize_t strlen  = show_general_info();
 
-    ssize_t logLen = strlen(log);
-
-    printk(KERN_INFO "%s read called\n", PREFIX);
-
-    if (copy_to_user(buf, log, logLen))
+    if (copy_to_user(buf, general_info, strlen))
     {
-        printk(KERN_ERR "%s copy_to_user error\n", PREFIX);
+        printk(KERN_ERR "%s%s: copy_to_user error\n", PREFIX, FORTUNEPREFIX);
+
+        return -EFAULT;
+    }
+
+    *fPos += strlen;
+
+    memset(general_info, 0, LOG_SIZE);
+
+    return strlen;
+}
+
+
+static int sighand_open(struct inode *spInode, struct file *spFile)
+{
+    pr_info("%s%s: signal_open called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static int sighand_release(struct inode *spInode, struct file *spFile)
+{
+    pr_info("%s%s: signal_releases called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static ssize_t sighand_write(struct file *file, const char __user *buf, size_t len, loff_t *fPos)
+{
+    pr_info("%s%s: signal_write called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static ssize_t sighand_read(struct file *file, char __user *buf, size_t len, loff_t *fPos)
+{
+    pr_info("%s%s: signal_read called\n", PREFIX, FORTUNEPREFIX);
+
+    if (*fPos > 0)
+        return 0;
+
+    ssize_t logLen = show_sighand_info();
+
+    if (copy_to_user(buf, sighand_info, logLen))
+    {
+        printk(KERN_ERR "%s: copy_to_user error\n", PREFIX);
+
+        return -EFAULT;
+    }
+
+    *fPos += logLen;
+
+    memset(sighand_info, 0, LOG_SIZE);
+
+    return logLen;
+}
+
+
+static int signal_logs_open(struct inode *spInode, struct file *spFile)
+{
+    pr_info("%s%s: signal_logs_open called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static int signal_logs_release(struct inode *spInode, struct file *spFile)
+{
+    pr_info("%s%s: signal_logs_releases called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static ssize_t signal_logs_write(struct file *file, const char __user *buf, size_t len, loff_t *fPos)
+{
+    pr_info("%s%s: signal_logs_write called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static ssize_t signal_logs_read(struct file *file, char __user *buf, size_t len, loff_t *fPos)
+{
+    pr_info("%s%s: signal_logs_read called\n", PREFIX, FORTUNEPREFIX);
+
+    if (*fPos > 0)
+        return 0;
+
+    ssize_t logLen = strlen(signal_logs);
+
+    printk(KERN_INFO "%s: read called\n", PREFIX);
+
+    if (copy_to_user(buf, signal_logs, logLen))
+    {
+        printk(KERN_ERR "%s: copy_to_user error\n", PREFIX);
 
         return -EFAULT;
     }
@@ -600,17 +437,155 @@ static ssize_t monitoring_read(struct file *file, char __user *buf, size_t len, 
     return logLen;
 }
 
-static struct proc_ops fops = {
-    .proc_open = monitoring_open,
-    .proc_read = monitoring_read,
-    .proc_write = monitoring_write,
-    .proc_release = monitoring_release,
+
+static int memory_open(struct inode *spInode, struct file *spFile)
+{
+    pr_info("%s%s: memory_open called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static int memory_release(struct inode *spInode, struct file *spFile)
+{
+    pr_info("%s%s: memory_releases called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static ssize_t memory_write(struct file *file, const char __user *buf, size_t len, loff_t *fPos)
+{
+    pr_info("%s%s: memory_write called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static ssize_t memory_read(struct file *file, char __user *buf, size_t len, loff_t *fPos)
+{
+    pr_info("%s%s: memory_read called\n", PREFIX, FORTUNEPREFIX);
+
+    if (*fPos > 0)
+        return 0;
+
+    ssize_t logLen = show_memory_info();
+
+    printk(KERN_INFO "%s: read called\n", PREFIX);
+
+    if (copy_to_user(buf, memory_info, logLen))
+    {
+        printk(KERN_ERR "%s: copy_to_user error\n", PREFIX);
+
+        return -EFAULT;
+    }
+
+    *fPos += logLen;
+
+    memset(memory_info, 0, LOG_SIZE);
+
+    return logLen;
+}
+
+static struct proc_ops signal_logs_ops = {
+    .proc_open = signal_logs_open,
+    .proc_read = signal_logs_read,
+    .proc_write = signal_logs_write,
+    .proc_release = signal_logs_release,
 };
+
+static struct proc_ops sighand_ops = {
+    .proc_open = sighand_open,
+    .proc_read = sighand_read,
+    .proc_write = sighand_write,
+    .proc_release = sighand_release,
+};
+
+static struct proc_ops memory_ops = {
+    .proc_open = memory_open,
+    .proc_read = memory_read,
+    .proc_write = memory_write,
+    .proc_release = memory_release,
+};
+
+static struct proc_ops general_ops = {
+    .proc_open = general_open,
+    .proc_read = general_read,
+    .proc_write = general_write,
+    .proc_release = general_release,
+};
+
+static void free_proc(void)
+{
+    if (proc_signal_logs_file != NULL)
+        remove_proc_entry(SIGNALFILENAME, proc_main_dir);
+
+    if (proc_logs_dir != NULL)
+        remove_proc_entry(LOGSDIRNAME, proc_main_dir);
+
+    if (proc_signal_file != NULL)
+        remove_proc_entry(SIGHANDFILENAME, proc_signal_file); 
+
+    if (proc_general_file != NULL)
+        remove_proc_entry(MAINDIRNAME, proc_main_dir);    
+
+    if (proc_main_dir != NULL)
+        remove_proc_entry(MAINDIRNAME, NULL);
+}
+
+static int init_proc(void)
+{
+    if ((proc_main_dir = proc_mkdir(MAINDIRNAME, NULL)) == NULL)
+    {
+        printk(KERN_ERR "create main dir error\n");
+        free_proc();
+
+        return -ENOMEM;
+    }
+
+    if (!(proc_general_file = proc_create(GENERALFILENAME, 0666, proc_main_dir, &general_ops)))
+    {
+        printk(KERN_ERR "%s: create general file error\n", PREFIX);
+        free_proc();
+
+        return -ENOMEM;
+    }
+
+    if (!(proc_memory_file = proc_create(MEMORYFILENAME, 0666, proc_main_dir, &memory_ops)))
+    {
+        printk(KERN_ERR "%s: create memory file error\n", PREFIX);
+        free_proc();
+
+        return -ENOMEM;
+    }
+
+    if (!(proc_general_file = proc_create(SIGHANDFILENAME, 0666, proc_main_dir, &sighand_ops)))
+    {
+        printk(KERN_ERR "%s: create signals file error\n", PREFIX);
+        free_proc();
+
+        return -ENOMEM;
+    }
+
+    if ((proc_logs_dir = proc_mkdir(LOGSDIRNAME, proc_main_dir)) == NULL)
+    {
+        printk(KERN_ERR "create main dir error\n");
+        free_proc();
+
+        return -ENOMEM;
+    }
+
+    if (!(proc_signal_logs_file = proc_create(SIGNALFILENAME, 0666, proc_logs_dir, &signal_logs_ops)))
+    {
+        printk(KERN_ERR "%s create signal logs file error\n", PREFIX);
+        free_proc();
+
+        return -ENOMEM;
+    }
+
+    return 0;
+}
 
 static int __init md_init(void)
 {
     
-
     // struct task_struct *task = &init_task; 
 
     // struct task_struct *task = pid_task(find_vpid(target_pid), PIDTYPE_PID);;
@@ -647,45 +622,23 @@ static int __init md_init(void)
     // print_info_mm(task->pid, task->mm);
     // print_signals(task);
 
-    if ((proc_dir = proc_mkdir(DIRNAME, NULL)) == NULL)
-    {
-        printk(KERN_ERR "proc_mkdir error\n");
-        if (proc_file != NULL)
-            remove_proc_entry(FILENAME, proc_dir);
-
-        if (proc_dir != NULL)
-            remove_proc_entry(DIRNAME, NULL);
-
-        return -ENOMEM;
-    }
-
-    if (!(proc_file= proc_create(FILENAME, 0666, proc_dir, &fops)))
-    {
-        printk(KERN_ERR "%s proc_create error\n", PREFIX);
-
-        if (proc_file != NULL)
-            remove_proc_entry(FILENAME, proc_dir);
-
-        if (proc_dir != NULL)
-            remove_proc_entry(DIRNAME, NULL);
-
-        return -ENOMEM;
-    }
-
-
+    
     int err;
-    err = fh_install_hooks(hooks, ARRAY_SIZE(hooks));
-    if(err)
-    {
-        if (proc_file != NULL)
-            remove_proc_entry(FILENAME, proc_dir);
 
-        if (proc_dir != NULL)
-            remove_proc_entry(DIRNAME, NULL);
+    err = init_proc();
+    if (err)
+    {
         return err;
     }
 
-    // init_mtasks();
+    err = install_hooks();
+    if(err)
+    {
+        printk(KERN_ERR "%s install_hooks error\n", PREFIX);
+        free_proc();
+        
+        return err;
+    }
 
     pr_info("%s: module loaded!\n", PREFIX);
 
@@ -694,13 +647,8 @@ static int __init md_init(void)
 
 static void __exit md_exit(void)
 {
-    fh_remove_hooks(hooks, ARRAY_SIZE(hooks));
-
-    if (proc_file != NULL)
-        remove_proc_entry(FILENAME, proc_dir);
-
-    if (proc_dir != NULL)
-        remove_proc_entry(DIRNAME, NULL);
+    remove_hooks();
+    free_proc();
 
     pr_info("%s: module unloaded!\n", PREFIX);
 }

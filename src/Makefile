@@ -1,11 +1,12 @@
 CONFIG_MODULE_SIG=n
 
+TARGET = monitoring
 CURRENT = $(shell uname -r)
 KDIR = /lib/modules/$(CURRENT)/build
 PWD = $(shell pwd)
 
-obj-m := monitoring.o
-monitoring-y := md.o
+obj-m := $(TARGET).o
+monitoring-y := md.o hooks.o
 
 default: 
 	make -C $(KDIR) M=$(PWD) modules 
@@ -17,11 +18,11 @@ clean:
 disclean: clean 
 	@rm *.ko *.symversS
 load:
-	sudo insmod md.ko
+	sudo insmod $(TARGET).ko
 unload:
-	sudo rmmod md.ko
+	sudo rmmod $(TARGET).ko
 info:
-	modinfo md.ko
+	modinfo $(TARGET).ko
 logs:
 	sudo dmesg
 cleanlogs:
