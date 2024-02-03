@@ -636,7 +636,7 @@ static void free_proc(void)
         remove_proc_entry(MAPSFILENAME, proc_main_dir);
 
     if (proc_general_file != NULL)
-        remove_proc_entry(MAINDIRNAME, proc_main_dir);    
+        remove_proc_entry(GENERALFILENAME, proc_main_dir);    
 
     if (proc_main_dir != NULL)
         remove_proc_entry(MAINDIRNAME, NULL);

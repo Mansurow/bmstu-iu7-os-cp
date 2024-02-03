@@ -200,6 +200,7 @@ void fh_remove_hooks(struct ftrace_hook *hooks, size_t count)
 #define PTREGS_SYSCALL_STUBS 1
 #endif
 
+// SYS_KILL
 #ifdef PTREGS_SYSCALL_STUBS
 static asmlinkage long (*real_sys_kill)(const struct pt_regs *);
 
@@ -258,6 +259,7 @@ static asmlinkage int hook_sys_kill(pid_t pid, int sig)
 }
 #endif
 
+// SYS_SIGNAL
 #ifdef PTREGS_SYSCALL_STUBS
 static asmlinkage long (*real_sys_signal)(const struct pt_regs *);
 
@@ -305,6 +307,75 @@ static asmlinkage int hook_sys_signal(int sig, __sighandler_t handler);
 }
 #endif
 
+#if defined(CONFIG_X86_64) && (LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0))
+#define PTREGS_SYSCALL_STUBS 1
+#endif
+
+// SYS_SEMGET
+#ifdef PTREGS_SYSCALL_STUBS
+static asmlinkage long (*real_sys_semget)(const struct pt_regs *);
+
+static asmlinkage int hook_sys_semget(const struct pt_regs *regs)
+{
+    int semid = real_sys_semget(regs);
+
+	key_t key = regs->di;
+	int nsem = regs->si;
+	int semflg = regs->dx;
+
+	pr_info("%s%s: sem create or get with semid: %d\n", PREFIX, SEMPREFIX, semid);
+
+	// if (res == 0)
+	// {
+	// 	pid_t pid = regs->di;
+	// 	int sig = regs->si;
+
+	// 	char currentString[TEMP_STRING_SIZE];
+
+	// 	if (sig > 0)
+	// 	{
+	// 		memset(currentString, 0, TEMP_STRING_SIZE);	
+	// 		snprintf(currentString, TEMP_STRING_SIZE, "Proccess %d sent signal %s to process %d\n", current->pid, signal_names[sig], pid);
+
+	// 		spin_lock(&signal_logs_lock);
+
+	// 		strcat(signal_logs, currentString); 
+
+	// 		spin_unlock(&signal_logs_lock);
+
+	// 		printk(KERN_INFO "%s%s: Process %d sent signal %s to process %d\n", PREFIX, SIGNALPREFIX, current->pid, signal_names[sig], pid);
+	// 	}
+	// }
+
+    return semid;
+}
+#else
+static asmlinkage long (*real_sys_semget)(key_t key, int nsems, int semflg);
+
+static asmlinkage int hook_sys_semget(key_t key, int nsems, int semflg)
+{
+    int semid = real_sys_semget(key, nsems, semflg);
+
+	// if (res == 0)
+	// {
+	// 	char currentString[TEMP_STRING_SIZE];
+
+	// 	memset(currentString, 0, TEMP_STRING_SIZE);	
+	// 	snprintf(currentString, TEMP_STRING_SIZE, "Proccess %d sent signal %s to process %d\n", current->pid, signal_names[sig], pid);
+
+	// 	spin_lock(&signal_logs_lock);
+
+	// 	strcat(signal_logs, currentString); 
+
+	// 	spin_unlock(&signal_logs_lock);
+
+	// 	pr_info("%s%s: Process %d sent signal %s to process %d\n", PREFIX, SIGNALPREFIX, current->pid, signal_names[sig], pid);
+	// }
+
+    return semid;
+}
+#endif
+
 /*
  * x86_64 kernels have a special naming convention for syscall entry points in newer kernels.
  * That's what you end up with if an architecture has 3 (three) ABIs for system calls.
@@ -324,7 +395,8 @@ static asmlinkage int hook_sys_signal(int sig, __sighandler_t handler);
 
 static struct ftrace_hook hooks[] = {
     HOOK("sys_kill",  hook_sys_kill,  &real_sys_kill),
-	HOOK("sys_signal",  hook_sys_signal,  &real_sys_signal)
+	HOOK("sys_signal",  hook_sys_signal,  &real_sys_signal),
+	HOOK("sys_semget",  hook_sys_semget,  &real_sys_semget)
 };
 
 int install_hooks()
