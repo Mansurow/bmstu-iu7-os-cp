@@ -45,13 +45,16 @@ static struct proc_dir_entry *proc_pid_dir = NULL;
 static struct proc_dir_entry *proc_general_file = NULL;
 static struct proc_dir_entry *proc_signal_logs_file = NULL;
 static struct proc_dir_entry *proc_signal_file = NULL;
+static struct proc_dir_entry *proc_sighand_file = NULL;
 static struct proc_dir_entry *proc_memory_file = NULL;
+static struct proc_dir_entry *proc_maps_file = NULL;
 
-static pid_t target_pid = 20403;
+static int mt_pid = -1;
 
 static char general_info[LOG_SIZE] = { 0 };
 static char sighand_info[LOG_SIZE] = { 0 };
 static char memory_info[LOG_SIZE] = { 0 };
+static char maps_info[LOG_SIZE] = { 0 };
 
 static int check_overflow(char *fString, char *sString, int maxSize)
 {
@@ -194,6 +197,20 @@ static void print_info_mm(pid_t pid, struct mm_struct *info_about_mem)
     // }
 }
 
+struct task_struct *find_task_struct(pid_t pid)
+{
+	struct task_struct *current_task = &init_task;
+
+	do {
+		if (current_task->pid == pid)
+		{
+			return current_task;
+		}
+	} while ((current_task = next_task(current_task)) != &init_task);
+
+	return NULL;
+}
+
 static ssize_t show_sighand_info(void) {
 
     int strlen = 0;
@@ -209,22 +226,9 @@ static ssize_t show_sighand_info(void) {
 
             char status;
 
-            // if (ka->sa.sa_handler == SIG_DFL) 
-            // {
-            //     status = 'D';
-            //     strlen += sprintf(sighand_info + strlen, "%7d\t%14s\t%8s\t%7s\t0x%x\n", 
-            //          task->pid, signal_names[signo], "Default", "?", ka->sa.sa_handler);
-            // } 
-            // else if (ka->sa.sa_handler == SIG_IGN) 
-            // {
-            //     strlen += sprintf(sighand_info + strlen, "%7d\t%14s\t%8s\t%7s\t%s\n", 
-            //         task->pid, signal_names[signo], "Ignore", "?", "?");                
-            // } 
             if (ka->sa.sa_handler > 1)
             {
-                status = 'C';
-                strlen += sprintf(sighand_info + strlen, "%7d\t%14s\t%7lld\t0x%x\n", 
-                    task->pid, signal_names[signo], ka->sa.sa_flags, ka->sa.sa_handler);
+                strlen += sprintf(sighand_info + strlen, "%7d\t%14s\t%7lld\t0x%x\n", task->pid, signal_names[signo], ka->sa.sa_flags, ka->sa.sa_handler);
             }
         }
     }
@@ -484,6 +488,100 @@ static ssize_t memory_read(struct file *file, char __user *buf, size_t len, loff
     return logLen;
 }
 
+
+static int maps_open(struct inode *spInode, struct file *spFile)
+{
+    pr_info("%s%s: maps_open called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static int maps_release(struct inode *spInode, struct file *spFile)
+{
+    pr_info("%s%s: maps_release called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static ssize_t maps_write(struct file *file, const char __user *ubuf, size_t len, loff_t *fPos)
+{
+    pr_info("%s%s: maps_write called\n", PREFIX, FORTUNEPREFIX);
+
+    char kbuf[10];
+    if (copy_from_user(kbuf, ubuf, len))
+    {
+        printk(KERN_ERR "%s%s: copy_from_user error\n", PREFIX, FORTUNEPREFIX);
+        return -EFAULT;
+    }
+    kbuf[len - 1] = 0;
+
+    sscanf(kbuf, "%d", &mt_pid);
+
+    return len;
+}
+
+static ssize_t maps_read(struct file *file, char __user *buf, size_t len, loff_t *fPos)
+{
+    pr_info("%s%s: maps_read called\n", PREFIX, FORTUNEPREFIX);
+
+    if (*fPos > 0)
+        return 0;
+
+    ssize_t strlen = 0;
+
+    struct task_struct *task = find_task_struct(mt_pid);
+
+    if (task == NULL || mt_pid == -1)
+    {
+        strlen += sprintf(maps_info + strlen, "Process with pid %d doesn't exist\n", mt_pid);
+    }
+    else
+    {
+        strlen += sprintf(maps_info + strlen, "%7s %15s %10s %10s %10s\n", "PID", "addr-addr", "Flags", "BYTES", "PAGES");
+
+        struct mm_struct *mm = task->mm;
+
+        if (mm == NULL)
+        {
+            strlen += sprintf(maps_info + strlen, "%7d %20s %10s %10s %10s\n", task->pid, "?-?", "?", "?", "?");
+        }
+        else
+        {
+            struct vm_area_struct *vma = mm->mmap;
+
+            if (vma == NULL)
+            {
+                strlen += sprintf(maps_info + strlen, "%7d %15s %10s %10s %10s\n", task->pid, "?-?", "?", "?", "?");
+            }
+            else 
+            {
+                for (; vma != NULL; vma = vma->vm_next)
+                {
+                    unsigned long bytes = vma->vm_end - vma->vm_start;
+                    int pages = bytes / 4096;
+
+                    strlen += sprintf(maps_info + strlen, "%7d %x-%x %10lld %10lu %7d\n", 
+                        task->pid, vma->vm_start, vma->vm_end, vma->vm_flags, bytes, pages);
+                }
+            }
+        }
+    }
+    
+    if (copy_to_user(buf, maps_info, strlen))
+    {
+        printk(KERN_ERR "%s%s: copy_to_user error\n", PREFIX, FORTUNEPREFIX);
+
+        return -EFAULT;
+    }
+
+    memset(maps_info, 0, LOG_SIZE);
+
+    *fPos += strlen;
+
+    return strlen;
+}
+
+
 static struct proc_ops signal_logs_ops = {
     .proc_open = signal_logs_open,
     .proc_read = signal_logs_read,
@@ -505,6 +603,13 @@ static struct proc_ops memory_ops = {
     .proc_release = memory_release,
 };
 
+static struct proc_ops maps_ops = {
+    .proc_open = maps_open,
+    .proc_read = maps_read,
+    .proc_write = maps_write,
+    .proc_release = maps_release,
+};
+
 static struct proc_ops general_ops = {
     .proc_open = general_open,
     .proc_read = general_read,
@@ -512,16 +617,23 @@ static struct proc_ops general_ops = {
     .proc_release = general_release,
 };
 
+
 static void free_proc(void)
 {
     if (proc_signal_logs_file != NULL)
-        remove_proc_entry(SIGNALFILENAME, proc_main_dir);
+        remove_proc_entry(SIGNALFILENAME, proc_logs_dir);
 
     if (proc_logs_dir != NULL)
         remove_proc_entry(LOGSDIRNAME, proc_main_dir);
 
-    if (proc_signal_file != NULL)
-        remove_proc_entry(SIGHANDFILENAME, proc_signal_file); 
+    if (proc_sighand_file != NULL)
+        remove_proc_entry(SIGHANDFILENAME, proc_main_dir); 
+
+    if (proc_memory_file != NULL)
+        remove_proc_entry(MEMORYFILENAME, proc_main_dir); 
+
+    if (proc_maps_file != NULL)
+        remove_proc_entry(MAPSFILENAME, proc_main_dir);
 
     if (proc_general_file != NULL)
         remove_proc_entry(MAINDIRNAME, proc_main_dir);    
@@ -556,7 +668,15 @@ static int init_proc(void)
         return -ENOMEM;
     }
 
-    if (!(proc_general_file = proc_create(SIGHANDFILENAME, 0666, proc_main_dir, &sighand_ops)))
+    if (!(proc_maps_file = proc_create(MAPSFILENAME, 0666, proc_main_dir, &maps_ops)))
+    {
+        printk(KERN_ERR "%s: create maps for process file error\n", PREFIX);
+        free_proc();
+
+        return -ENOMEM;
+    }
+
+    if (!(proc_sighand_file = proc_create(SIGHANDFILENAME, 0666, proc_main_dir, &sighand_ops)))
     {
         printk(KERN_ERR "%s: create signals file error\n", PREFIX);
         free_proc();
@@ -585,44 +705,6 @@ static int init_proc(void)
 
 static int __init md_init(void)
 {
-    
-    // struct task_struct *task = &init_task; 
-
-    // struct task_struct *task = pid_task(find_vpid(target_pid), PIDTYPE_PID);;
-    // if (!task) {
-    //     pr_err("Process with PID %d not found\n", target_pid);
-    //     return -ESRCH;
-    // }
-
-    // do {
-    //     printk(KERN_INFO "%s[GENERAL]: " 
-    //         "pid: %d, ppid: %d, pgid: %d, name: %s\nprio: %d, static prio: %d, normal prio: %d, realtime_prio: %d\n"
-    //         "delay: %lld\n"
-    //         "utime: %lld ticks, stime: %lld ticks\n"
-    //         "Sched_rt_entity: timeout: %ld, watchdog_stamp: %ld, time_slice:%ld\n", 
-    //         PREFIX,
-    //         task->pid, task->parent->pid, task->group_leader->pid, task->comm,
-    //         task->prio, task->static_prio, task->normal_prio, task->rt_priority,
-    //         task->sched_info.run_delay, task->utime, task->stime,
-    //         task->rt.watchdog_stamp, task->rt.time_slice);
-     
-    //     if (task->mm != NULL)
-    //     {
-    //         print_info_mm(task->pid, task->mm);
-    //     }
-    //     else
-    //     {
-    //         printk(KERN_INFO "%s[Memory][%d]: нет доступа", PREFIX, task->pid);
-    //     }
-    //     printk(KERN_INFO "\n");
-
-    // } while ((task = next_task(task)) != &init_task);
-     
-    // print_general_info(task); 
-    // print_info_mm(task->pid, task->mm);
-    // print_signals(task);
-
-    
     int err;
 
     err = init_proc();

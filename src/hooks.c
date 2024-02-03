@@ -205,59 +205,56 @@ static asmlinkage long (*real_sys_kill)(const struct pt_regs *);
 
 static asmlinkage int hook_sys_kill(const struct pt_regs *regs)
 {
-    pid_t pid = regs->di;
-    int sig = regs->si;
+    int res = real_sys_kill(regs);
 
-	// spin_lock(&msignal_lock);
+	if (res == 0)
+	{
+		pid_t pid = regs->di;
+		int sig = regs->si;
 
-    // mtasks[current->pid].m_signal[sig].count_sent++;
-    // mtasks[pid].m_signal[sig].count_received++;
+		char currentString[TEMP_STRING_SIZE];
 
-	// spin_unlock(&msignal_lock);
+		if (sig > 0)
+		{
+			memset(currentString, 0, TEMP_STRING_SIZE);	
+			snprintf(currentString, TEMP_STRING_SIZE, "Proccess %d sent signal %s to process %d\n", current->pid, signal_names[sig], pid);
 
-	char currentString[TEMP_STRING_SIZE];
+			spin_lock(&signal_logs_lock);
 
-    memset(currentString, 0, TEMP_STRING_SIZE);	
-	snprintf(currentString, TEMP_STRING_SIZE, "Proccess %d sent signal %s to process %d\n", current->pid, signal_names[sig], pid);
+			strcat(signal_logs, currentString); 
 
-	spin_lock(&signal_logs_lock);
+			spin_unlock(&signal_logs_lock);
 
-	strcat(signal_logs, currentString); 
+			printk(KERN_INFO "%s%s: Process %d sent signal %s to process %d\n", PREFIX, SIGNALPREFIX, current->pid, signal_names[sig], pid);
+		}
+	}
 
-	spin_unlock(&signal_logs_lock);
-
-	printk(KERN_INFO "%s%s: Process %d sent signal %s to process %d\n", PREFIX, SIGNALPREFIX, current->pid, signal_names[sig], pid);
-
-    real_sys_kill(regs);
-    return 0;
+    return res;
 }
 #else
 static asmlinkage long (*real_sys_kill)(pid_t pid, int sig);
 
 static asmlinkage int hook_sys_kill(pid_t pid, int sig)
 {
-    // spin_lock(&msignal_lock);
+    int res = real_sys_kill(pid, sig);
 
-    // mtasks[current->pid].m_signal[sig].count_sent++;
-    // mtasks[pid].m_signal[sig].count_received++;
+	if (res == 0)
+	{
+		char currentString[TEMP_STRING_SIZE];
 
-	// spin_unlock(&msignal_lock);
+		memset(currentString, 0, TEMP_STRING_SIZE);	
+		snprintf(currentString, TEMP_STRING_SIZE, "Proccess %d sent signal %s to process %d\n", current->pid, signal_names[sig], pid);
 
-	char currentString[TEMP_STRING_SIZE];
+		spin_lock(&signal_logs_lock);
 
-    memset(currentString, 0, TEMP_STRING_SIZE);	
-	snprintf(currentString, TEMP_STRING_SIZE, "Proccess %d sent signal %s to process %d\n", current->pid, signal_names[sig], pid);
+		strcat(signal_logs, currentString); 
 
-	spin_lock(&signal_logs_lock);
+		spin_unlock(&signal_logs_lock);
 
-	strcat(signal_logs, currentString); 
+		pr_info("%s%s: Process %d sent signal %s to process %d\n", PREFIX, SIGNALPREFIX, current->pid, signal_names[sig], pid);
+	}
 
-	spin_unlock(&signal_logs_lock);
-
-	printk(KERN_INFO "%s%s: Process %d sent signal %s to process %d\n", PREFIX, SIGNALPREFIX, current->pid, signal_names[sig], pid);
-
-    real_sys_kill(pid, sig);
-    return 0;
+    return res;
 }
 #endif
 
@@ -268,7 +265,7 @@ static asmlinkage int hook_sys_signal(const struct pt_regs *regs)
 {
     pid_t sig = regs->di;
 
-	char currentString[TEMP_STRING_SIZE];
+    char currentString[TEMP_STRING_SIZE];
 
     memset(currentString, 0, TEMP_STRING_SIZE);	
 	snprintf(currentString, TEMP_STRING_SIZE, "Proccess %d assign own handler for signal %s\n", current->pid, signal_names[sig]);
@@ -282,6 +279,7 @@ static asmlinkage int hook_sys_signal(const struct pt_regs *regs)
 	printk(KERN_INFO "%s%s: Proccess %d assign own handler for signal %s\n", PREFIX, SIGNALPREFIX, current->pid, signal_names[sig]);
 
     real_sys_signal(regs);
+
     return 0;
 }
 #else
