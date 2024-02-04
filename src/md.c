@@ -19,6 +19,7 @@
 #include <linux/proc_fs.h>
 
 #include "hooks.h"
+#include "list.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Mansurov Vladislav");
@@ -27,7 +28,6 @@ MODULE_VERSION("1.0");
 
 #define MAINDIRNAME  "monitoring"
 #define LOGSDIRNAME  "logs"
-#define PIDDIRNAME   "pid"
 
 #define GENERALFILENAME  "general"
 #define SIGNALFILENAME   "signals"
@@ -40,7 +40,6 @@ MODULE_VERSION("1.0");
 
 static struct proc_dir_entry *proc_main_dir = NULL;
 static struct proc_dir_entry *proc_logs_dir = NULL;
-static struct proc_dir_entry *proc_pid_dir = NULL;
 
 static struct proc_dir_entry *proc_general_file = NULL;
 static struct proc_dir_entry *proc_signal_logs_file = NULL;
@@ -48,6 +47,7 @@ static struct proc_dir_entry *proc_signal_file = NULL;
 static struct proc_dir_entry *proc_sighand_file = NULL;
 static struct proc_dir_entry *proc_memory_file = NULL;
 static struct proc_dir_entry *proc_maps_file = NULL;
+static struct proc_dir_entry *proc_pipe_file = NULL;
 
 static int mt_pid = -1;
 
@@ -55,41 +55,21 @@ static char general_info[LOG_SIZE] = { 0 };
 static char sighand_info[LOG_SIZE] = { 0 };
 static char memory_info[LOG_SIZE] = { 0 };
 static char maps_info[LOG_SIZE] = { 0 };
+static char pipes_info[LOG_SIZE] = { 0 };
 
-static int check_overflow(char *fString, char *sString, int maxSize)
-{
-    int sumLen = strlen(fString) + strlen(sString);
-
-    if (sumLen >= maxSize)
-    {
-        printk(KERN_ERR "%s not enough space in log (%d needed but %d available)\n", PREFIX, sumLen, maxSize);
-
-        return -ENOMEM;
-    }
-
-    return 0;
-}
-
-static void print_sem(struct task_struct *task)
-{
-    // struct task_struct *p = current;
-    // struct list_head *pos;
-
-    // down_read(&p->mm->mmap_sem);
-
-    // printk(KERN_INFO "Process ID: %d\n", task->pid);
-    // printk(KERN_INFO "Semafores:\n");
-
-    // list_for_each(pos, &p->mm->mmap_list) {
-    //     struct vm_area_struct *vma = container_of(pos, struct vm_area_struct, vm_mmap);
-
-    //     if (vma->vm_flags & VM_SHARED) {
-    //         printk(KERN_INFO "Start: %lx, End: %lx\n", vma->vm_start, vma->vm_end);
-    //     }
-    // }
-
-    // up_read(&p->mm->mmap_sem);
-}
+// static int check_overflow(char *fString, char *sString, int maxSize)
+// {
+//     int sumLen = strlen(fString) + strlen(sString);
+//
+//     if (sumLen >= maxSize)
+//     {
+//         printk(KERN_ERR "%s not enough space in log (%d needed but %d available)\n", PREFIX, sumLen, maxSize);
+//
+//         return -ENOMEM;
+//     }
+//
+//     return 0;
+// }
 
 static void print_page(struct page *page)
 {
@@ -224,11 +204,9 @@ static ssize_t show_sighand_info(void) {
         for (int signo = 1; signo < _NSIG; ++signo) {
             struct k_sigaction *ka = &task->sighand->action[signo - 1];
 
-            char status;
-
             if (ka->sa.sa_handler > 1)
             {
-                strlen += sprintf(sighand_info + strlen, "%7d\t%14s\t%7lld\t0x%x\n", task->pid, signal_names[signo], ka->sa.sa_flags, ka->sa.sa_handler);
+                strlen += sprintf(sighand_info + strlen, "%7d %14s %7lu 0x%x\n", task->pid, signal_names[signo], ka->sa.sa_flags, ka->sa.sa_handler);
             }
         }
     }
@@ -270,14 +248,14 @@ static ssize_t show_general_info(void)
 {
     int strlen = 0;
 
-    strlen += sprintf(general_info + strlen, "%7s\t%7s\t%7s\t%7s\t%10s\t%7s\t%7s\t%7s\t%7s\t%7s\t%14s\t%14s\t%14s\t%7s\n", 
+    strlen += sprintf(general_info + strlen, "%7s %7s %7s %7s %10s %7s %7s %7s %7s %7s %14s %14s %14s %7s\n", 
         "PPID", "PID", "STATE", "ESTATE", "FLAGS", "POLICY", "PRIO", "SPRIO", "NPRIO", "PRPRIO", "UTIME", "STIME", "DELAY", "COMM");
 
     struct task_struct *task = &init_task;
 
     do 
     {
-        strlen += sprintf(general_info + strlen, "%7d\t%7d\t%7d\t%7d\t%10x\t%7d\t%7d\t%7d\t%7d\t%7d\t%14ld\t%14ld\t%14ld\t%s\n",
+        strlen += sprintf(general_info + strlen, "%7d %7d %7d %7d %10x %7d %7d %7d %7d %7d %14llu %14llu %14llu\t%s\n",
                         task->parent->pid, task->pid, task->__state, task->exit_state, task->flags,
                         task->policy, task->prio, task->static_prio, task->normal_prio, task->rt_priority,
                         task->utime, task->stime, task->sched_info.run_delay,
@@ -287,25 +265,6 @@ static ssize_t show_general_info(void)
 
     return strlen;
 } 
-
-static void print_signals(struct task_struct *task)
-{
-    struct sighand_struct *sighand = task->sighand;
-
-    // for (int signo = 1; signo < _NSIG; ++signo) {
-    //     struct k_sigaction *ka = &sighand->action[signo-1];
-    //     print_signal_info(signo, ka);
-    // }
-
-    struct signal_struct *sig = task->signal;
-    struct sigpending *pending = &sig->shared_pending;
-    struct sigqueue *q;
-
-    list_for_each_entry(q, &pending->list, list) {
-        pr_info("Received signal %d from PID %d\n", q->info.si_signo, q->info.si_pid);
-    }
-}
-
 
 static int general_open(struct inode *spInode, struct file *spFile)
 {
@@ -547,23 +506,24 @@ static ssize_t maps_read(struct file *file, char __user *buf, size_t len, loff_t
         }
         else
         {
-            struct vm_area_struct *vma = mm->mmap;
+            // 5.19.0 и меньше версия ядра, в 6+ убрали по причине оптимизации
+            // struct vm_area_struct *vma = mm->mmap;
 
-            if (vma == NULL)
-            {
-                strlen += sprintf(maps_info + strlen, "%7d %15s %10s %10s %10s\n", task->pid, "?-?", "?", "?", "?");
-            }
-            else 
-            {
-                for (; vma != NULL; vma = vma->vm_next)
-                {
-                    unsigned long bytes = vma->vm_end - vma->vm_start;
-                    int pages = bytes / 4096;
+            // if (vma == NULL)
+            // {
+            //     strlen += sprintf(maps_info + strlen, "%7d %15s %10s %10s %10s\n", task->pid, "?-?", "?", "?", "?");
+            // }
+            // else 
+            // {
+            //     for (; vma != NULL; vma = vma->vm_next)
+            //     {
+            //         unsigned long bytes = vma->vm_end - vma->vm_start;
+            //         int pages = bytes / 4096;
 
-                    strlen += sprintf(maps_info + strlen, "%7d %x-%x %10lld %10lu %7d\n", 
-                        task->pid, vma->vm_start, vma->vm_end, vma->vm_flags, bytes, pages);
-                }
-            }
+            //         strlen += sprintf(maps_info + strlen, "%7d %x-%x %10lld %10lu %7d\n", 
+            //             task->pid, vma->vm_start, vma->vm_end, vma->vm_flags, bytes, pages);
+            //     }
+            // }
         }
     }
     
@@ -575,6 +535,76 @@ static ssize_t maps_read(struct file *file, char __user *buf, size_t len, loff_t
     }
 
     memset(maps_info, 0, LOG_SIZE);
+
+    *fPos += strlen;
+
+    return strlen;
+}
+
+
+static int pipe_open(struct inode *spInode, struct file *spFile)
+{
+    pr_info("%s%s: pipe_open called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static int pipe_release(struct inode *spInode, struct file *spFile)
+{
+    pr_info("%s%s: pipe_release called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static ssize_t pipe_write(struct file *file, const char __user *ubuf, size_t len, loff_t *fPos)
+{
+    pr_info("%s%s: pipe_write called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static ssize_t pipe_read(struct file *file, char __user *buf, size_t len, loff_t *fPos)
+{
+    pr_info("%s%s: pipe_read called\n", PREFIX, FORTUNEPREFIX);
+
+    if (*fPos > 0)
+        return 0;
+
+    ssize_t strlen = 0;
+
+    strlen += sprintf(pipes_info + strlen, "%7s %18s %7s %s\n", "PID", "addr", "COUNT", "SPIDS");
+    
+    pnode *head = pipe_info_list.head;
+
+    char temp[TEMP_STRING_SIZE] = { 0 };
+
+    for (; head; head = head->next)
+    {
+        int count = 0;
+        ssize_t clen = 0;
+
+        childnode_t *chead = head->children; 
+
+        for (; chead; chead = chead->next)
+        {
+            clen += sprintf(temp + clen, "%d,", chead->pid);
+            count++;
+        }
+
+        strlen += sprintf(pipes_info + strlen, "%7d 0x%p %7d %s\n",
+            head->ppid, head->fd, count, temp);
+
+        memset(temp, 0, TEMP_STRING_SIZE);     
+    }
+
+    if (copy_to_user(buf, pipes_info, strlen))
+    {
+        printk(KERN_ERR "%s%s: copy_to_user error\n", PREFIX, FORTUNEPREFIX);
+
+        return -EFAULT;
+    }
+
+    memset(pipes_info, 0, LOG_SIZE);
 
     *fPos += strlen;
 
@@ -617,6 +647,13 @@ static struct proc_ops general_ops = {
     .proc_release = general_release,
 };
 
+static struct proc_ops pipe_ops = {
+    .proc_open = pipe_open,
+    .proc_read = pipe_read,
+    .proc_write = pipe_write,
+    .proc_release = pipe_release,
+};
+
 
 static void free_proc(void)
 {
@@ -628,6 +665,9 @@ static void free_proc(void)
 
     if (proc_sighand_file != NULL)
         remove_proc_entry(SIGHANDFILENAME, proc_main_dir); 
+
+    if (proc_pipe_file != NULL)
+        remove_proc_entry(PIPEFILENAME, proc_main_dir); 
 
     if (proc_memory_file != NULL)
         remove_proc_entry(MEMORYFILENAME, proc_main_dir); 
@@ -655,6 +695,14 @@ static int init_proc(void)
     if (!(proc_general_file = proc_create(GENERALFILENAME, 0666, proc_main_dir, &general_ops)))
     {
         printk(KERN_ERR "%s: create general file error\n", PREFIX);
+        free_proc();
+
+        return -ENOMEM;
+    }
+
+    if (!(proc_pipe_file = proc_create(PIPEFILENAME, 0666, proc_main_dir, &pipe_ops)))
+    {
+        printk(KERN_ERR "%s: create pipe file error\n", PREFIX);
         free_proc();
 
         return -ENOMEM;
@@ -731,6 +779,7 @@ static void __exit md_exit(void)
 {
     remove_hooks();
     free_proc();
+    free_plist(&pipe_info_list);
 
     pr_info("%s: module unloaded!\n", PREFIX);
 }

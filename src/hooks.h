@@ -10,8 +10,13 @@
 #include <linux/uaccess.h>
 #include <linux/version.h>
 #include <linux/kprobes.h>
+#include <linux/ipc.h>
+#include <linux/signal.h>
+#include <linux/sem.h>
+#include <linux/shm.h>
 
 #include "utils.h"
+#include "list.h"
 
 struct ftrace_hook {
     const char *name;
@@ -26,5 +31,7 @@ void remove_hooks(void);
 int install_hooks(void);
 
 extern char signal_logs[LOG_SIZE];
+extern struct monitoring_pipe_array pipes;
+extern plist pipe_info_list;
 
 #endif

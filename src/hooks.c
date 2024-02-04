@@ -2,8 +2,14 @@
 
 extern char signal_logs[LOG_SIZE] = { 0 };
 
+extern plist pipe_info_list = { 
+    .len = 0,
+    .head = NULL,
+    .tail = NULL
+};
+
 static DEFINE_SPINLOCK(signal_logs_lock);
-static DEFINE_SPINLOCK(msignal_lock);
+static DEFINE_SPINLOCK(pipe_lock);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
 static unsigned long lookup_name(const char *name)
@@ -214,20 +220,18 @@ static asmlinkage int hook_sys_kill(const struct pt_regs *regs)
 		int sig = regs->si;
 
 		char currentString[TEMP_STRING_SIZE];
+		
+		memset(currentString, 0, TEMP_STRING_SIZE);	
+		snprintf(currentString, TEMP_STRING_SIZE, "Proccess %d sent signal %s to process %d\n", current->pid, signal_names[sig], pid);
 
-		if (sig > 0)
-		{
-			memset(currentString, 0, TEMP_STRING_SIZE);	
-			snprintf(currentString, TEMP_STRING_SIZE, "Proccess %d sent signal %s to process %d\n", current->pid, signal_names[sig], pid);
+		spin_lock(&signal_logs_lock);
 
-			spin_lock(&signal_logs_lock);
+		strcat(signal_logs, currentString); 
 
-			strcat(signal_logs, currentString); 
+		spin_unlock(&signal_logs_lock);
 
-			spin_unlock(&signal_logs_lock);
-
-			printk(KERN_INFO "%s%s: Process %d sent signal %s to process %d\n", PREFIX, SIGNALPREFIX, current->pid, signal_names[sig], pid);
-		}
+		printk(KERN_INFO "%s%s: Process %d sent signal %s to process %d\n", PREFIX, SIGNALPREFIX, current->pid, signal_names[sig], pid);
+		
 	}
 
     return res;
@@ -400,6 +404,32 @@ static asmlinkage int hook_sys_semctl(int semid, int semnum, int cmd, unsigned l
 #endif
 
 // SYS_PIPE
+
+static void get_pipe_info(int __user *fildes)
+{
+	spin_lock(&pipe_lock);
+
+	childnode_t *head = NULL;
+
+	struct list_head *pos;
+	struct task_struct *task;
+
+	int index = 0;
+	pid_t tmp_pid;
+    list_for_each(pos, &(current->children))
+	{
+		task = list_entry(pos, struct task_struct, sibling);
+		tmp_pid = task->pid;
+		push_bask_childlist(&head, tmp_pid);
+	}
+
+	push_bask_plist(&pipe_info_list, current->pid, fildes, head);
+
+	spin_unlock(&pipe_lock);
+
+	pr_info("%s%s: Proccess %d create pipe fd: %p\n", PREFIX, PIPEPREFIX, current->pid, fildes);
+}
+
 #ifdef PTREGS_SYSCALL_STUBS
 static asmlinkage long (*real_sys_pipe)(const struct pt_regs *);
 
@@ -411,8 +441,7 @@ static asmlinkage int hook_sys_pipe(const struct pt_regs *regs)
 
 	if (res == 0)
 	{
-		// task пройтись по родственникам и вывести все их и можно сказать, что они общаются через pipe
-		pr_info("%s%s: Proccess %d create pipe fd: %llu\n", PREFIX, PIPEPREFIX, current->pid, fildes);
+		get_pipe_info(fildes);
 	}
 
     return res;
@@ -424,11 +453,9 @@ static asmlinkage int hook_sys_pipe(int __user *fildes)
 {
     int res = real_sys_pipe(fildes);
 
-	// task пройтись по родственникам и вывести все их и можно сказать, что они общаются через pipe
 	if (res == 0)
 	{
-		// task пройтись по родственникам и вывести все их и можно сказать, что они общаются через pipe
-		pr_info("%s%s: Proccess %d create pipe fd: %llu\n", PREFIX, PIPEPREFIX, current->pid, fildes);
+		get_pipe_info(fildes);
 	}
 
     return res;
@@ -441,14 +468,13 @@ static asmlinkage long (*real_sys_pipe2)(const struct pt_regs *);
 
 static asmlinkage int hook_sys_pipe2(const struct pt_regs *regs)
 {
-    int res = real_sys_pipe(regs);
+    int res = real_sys_pipe2(regs);
 
 	int __user *fildes = regs->di;
 
 	if (res == 0)
 	{
-		// task пройтись по родственникам и вывести все их и можно сказать, что они общаются через pipe
-		//pr_info("%s%s: Proccess %d create pipe fd: %llu\n", PREFIX, PIPEPREFIX, current->pid, fildes);
+		get_pipe_info(fildes);
 	}
 
     return res;
@@ -462,9 +488,155 @@ static asmlinkage int hook_sys_pipe2(int __user *fildes, int flags)
 
 	if (res == 0)
 	{
-		// task пройтись по родственникам и вывести все их и можно сказать, что они общаются через pipe
-		// pr_info("%s%s: Proccess %d create pipe fd: %llu\n", PREFIX, PIPEPREFIX, current->pid, fildes);
+		get_pipe_info(fildes);
 	}
+
+    return res;
+}
+#endif
+
+// SYS_CLOSE
+#ifdef PTREGS_SYSCALL_STUBS
+static asmlinkage long (*real_sys_close)(const struct pt_regs *);
+
+static asmlinkage int hook_sys_close(const struct pt_regs *regs)
+{
+    int res = real_sys_close(regs);
+
+	unsigned int *fd = regs->di;
+
+	if (res == 0)
+	{
+		pr_info("%s%s: Proccess %d close fd: %p\n", PREFIX, PIPEPREFIX, current->pid, fd);
+	}
+
+    return res;
+}
+#else
+static asmlinkage long (*real_sys_pipe2)(unsigned int fd);
+
+static asmlinkage int hook_sys_close(unsigned int fd)
+{
+    int res = real_sys_close(fd);
+
+	if (res == 0)
+	{
+		pr_info("%s%s: Proccess %d close fd: %p\n", PREFIX, PIPEPREFIX, current->pid, fd);
+	}
+
+    return res;
+}
+#endif
+
+// SYS_SHMGET
+#ifdef PTREGS_SYSCALL_STUBS
+static asmlinkage long (*real_sys_shmget)(const struct pt_regs *);
+
+static asmlinkage int hook_sys_shmget(const struct pt_regs *regs)
+{
+    int shmid = real_sys_shmget(regs);
+
+	key_t key = regs->di;
+	size_t size = regs->si;
+	int flag = regs->dx;
+
+	pr_info("%s%s: Proccess %d create or get shm %d on %lu size\n", PREFIX, SHMPREFIX, current->pid, shmid, size);
+
+    return shmid;
+}
+#else
+static asmlinkage long (*real_sys_shmget)(key_t key, size_t size, int flag);
+
+static asmlinkage int hook_sys_shmget(key_t key, size_t size, int flag)
+{
+    int shmid = real_sys_shmget(key, size, flag);
+
+	pr_info("%s%s: Proccess %d create or get shm %d on %lu size\n", PREFIX, SHMPREFIX, current->pid, shmid, size);
+
+    return shmid;
+}
+#endif
+
+// SYS_SHMAT
+#ifdef PTREGS_SYSCALL_STUBS
+static asmlinkage long (*real_sys_shmat)(const struct pt_regs *);
+
+static asmlinkage long hook_sys_shmat(const struct pt_regs *regs)
+{
+	int shmid = regs->di;
+	// char __user *shmaddr = regs->si;
+	// int shmflag = regs->dx;
+
+	long addr = real_sys_shmat(regs);
+
+	pr_info("%s%s: Proccess %d was attached to %d shm - addr - %lu\n", PREFIX, SHMPREFIX, current->pid, shmid, addr);
+
+    return addr;
+}
+#else
+static asmlinkage long (*real_sys_shmat)(int shmid, char __user *shmaddr, int shmflg);
+
+static asmlinkage long hook_sys_shmat(int shmid, char __user *shmaddr, int shmflg)
+{
+    unsigned long addr = real_sys_shmat(shmid, shmaddr, shmflg);
+
+	pr_info("%s%s: Proccess %d was attached to %d shm - addr: %lu\n", PREFIX, SHMPREFIX, current->pid, shmid, addr);
+
+    return addr;
+}
+#endif
+
+// SYS_SHMDT
+#ifdef PTREGS_SYSCALL_STUBS
+static asmlinkage long (*real_sys_shmdt)(const struct pt_regs *);
+
+static asmlinkage int hook_sys_shmdt(const struct pt_regs *regs)
+{
+    int res = real_sys_shmdt(regs);
+
+	char __user *shmaddr = regs->di;
+
+	pr_info("%s%s: Proccess %d was detached shm - addr: %x\n", PREFIX, SHMPREFIX, current->pid, shmaddr);
+
+    return res;
+}
+#else
+static asmlinkage long (*real_sys_shmdt)(char __user *shmaddr);
+
+static asmlinkage int real_sys_shmdt(char __user *shmaddr)
+{
+    int res = real_sys_shmdt(shmaddr);
+
+	pr_info("%s%s: Proccess %d was detached shm - addr: %x\n", PREFIX, SHMPREFIX, current->pid, shmaddr);
+
+    return res;
+}
+#endif
+
+// SYS_SHCTL
+#ifdef PTREGS_SYSCALL_STUBS
+static asmlinkage long (*real_sys_shmctl)(const struct pt_regs *);
+
+static asmlinkage int hook_sys_shmctl(const struct pt_regs *regs)
+{
+    int res = real_sys_shmctl(regs);
+
+	int shmid = regs->di;
+	int cmd = regs->si;
+	struct shmid_ds __user *buf = regs->dx;
+
+	pr_info("%s%s: Proccess %d was ctl %d shm, cmd: %d\n", PREFIX, SHMPREFIX, current->pid, shmid, cmd);
+
+    return res;
+}
+#else
+static asmlinkage long (*real_sys_shmctl)(int shmid, int cmd, struct shmid_ds __user *buf);
+
+static asmlinkage int real_sys_shmctl(int shmid, int cmd, struct shmid_ds __user *buf)
+{
+    int res = real_sys_shmctl(shmid, cmd, buf);
+
+	pr_info("%s%s: Proccess %d was ctl %d shm, cmd: %d\n", PREFIX, SHMPREFIX, current->pid, shmid, cmd);
 
     return res;
 }
@@ -495,6 +667,12 @@ static struct ftrace_hook hooks[] = {
 	HOOK("sys_semctl",  hook_sys_semctl,  &real_sys_semctl),
 	HOOK("sys_pipe",  hook_sys_pipe, &real_sys_pipe),
 	HOOK("sys_pipe2",  hook_sys_pipe2, &real_sys_pipe2),
+	// HOOK("sys_close",  hook_sys_close, &real_sys_close),
+	HOOK("sys_shmget",  hook_sys_shmget, &real_sys_shmget),
+	HOOK("sys_shmat",  hook_sys_shmat, &real_sys_shmat),
+	HOOK("sys_shmdt",  hook_sys_shmdt, &real_sys_shmdt),
+	HOOK("sys_old_shmctl",  hook_sys_shmctl, &real_sys_shmctl),
+	HOOK("sys_shmctl",  hook_sys_shmctl, &real_sys_shmctl),
 };
 
 int install_hooks()

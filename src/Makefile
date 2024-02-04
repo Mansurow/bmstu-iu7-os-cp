@@ -6,7 +6,7 @@ KDIR = /lib/modules/$(CURRENT)/build
 PWD = $(shell pwd)
 
 obj-m := $(TARGET).o
-monitoring-y := md.o hooks.o
+monitoring-y := md.o hooks.o list.o
 
 default: 
 	make -C $(KDIR) M=$(PWD) modules 
@@ -21,6 +21,9 @@ load:
 	sudo insmod $(TARGET).ko
 unload:
 	sudo rmmod $(TARGET).ko
+reload: 
+	sudo rmmod $(TARGET).ko
+	sudo insmod $(TARGET).ko
 info:
 	modinfo $(TARGET).ko
 logs:
