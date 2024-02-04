@@ -1,10 +1,15 @@
 #ifndef __HOOKS_H_
 #define __HOOKS_H_
 
-#include <linux/kprobes.h>
-#include <linux/version.h>
 #include <linux/ftrace.h>
-#include <linux/time.h>
+#include <linux/kallsyms.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/linkage.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
+#include <linux/version.h>
+#include <linux/kprobes.h>
 
 #include "utils.h"
 

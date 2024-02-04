@@ -323,29 +323,7 @@ static asmlinkage int hook_sys_semget(const struct pt_regs *regs)
 	int nsem = regs->si;
 	int semflg = regs->dx;
 
-	pr_info("%s%s: sem create or get with semid: %d\n", PREFIX, SEMPREFIX, semid);
-
-	// if (res == 0)
-	// {
-	// 	pid_t pid = regs->di;
-	// 	int sig = regs->si;
-
-	// 	char currentString[TEMP_STRING_SIZE];
-
-	// 	if (sig > 0)
-	// 	{
-	// 		memset(currentString, 0, TEMP_STRING_SIZE);	
-	// 		snprintf(currentString, TEMP_STRING_SIZE, "Proccess %d sent signal %s to process %d\n", current->pid, signal_names[sig], pid);
-
-	// 		spin_lock(&signal_logs_lock);
-
-	// 		strcat(signal_logs, currentString); 
-
-	// 		spin_unlock(&signal_logs_lock);
-
-	// 		printk(KERN_INFO "%s%s: Process %d sent signal %s to process %d\n", PREFIX, SIGNALPREFIX, current->pid, signal_names[sig], pid);
-	// 	}
-	// }
+	pr_info("%s%s: Proccess %d create or get %d semafores with semid %d\n", PREFIX, SEMPREFIX, current->pid, nsem, semid);
 
     return semid;
 }
@@ -356,23 +334,139 @@ static asmlinkage int hook_sys_semget(key_t key, int nsems, int semflg)
 {
     int semid = real_sys_semget(key, nsems, semflg);
 
-	// if (res == 0)
-	// {
-	// 	char currentString[TEMP_STRING_SIZE];
-
-	// 	memset(currentString, 0, TEMP_STRING_SIZE);	
-	// 	snprintf(currentString, TEMP_STRING_SIZE, "Proccess %d sent signal %s to process %d\n", current->pid, signal_names[sig], pid);
-
-	// 	spin_lock(&signal_logs_lock);
-
-	// 	strcat(signal_logs, currentString); 
-
-	// 	spin_unlock(&signal_logs_lock);
-
-	// 	pr_info("%s%s: Process %d sent signal %s to process %d\n", PREFIX, SIGNALPREFIX, current->pid, signal_names[sig], pid);
-	// }
+	pr_info("%s%s: Proccess %d create or get %d semafores with semid %d\n", PREFIX, SEMPREFIX, current->pid, nsem, semid);
 
     return semid;
+}
+#endif
+
+// SYS_SEMOP
+#ifdef PTREGS_SYSCALL_STUBS
+static asmlinkage long (*real_sys_semop)(const struct pt_regs *);
+
+static asmlinkage int hook_sys_semop(const struct pt_regs *regs)
+{
+    int res = real_sys_semop(regs);
+
+	int semid = regs->di;
+	struct sembuf __user *sops = regs->si;
+	unsigned nsops = regs->dx;
+
+	pr_info("%s%s: Proccess %d operate with %d semafore on semid %d\n", PREFIX, SEMPREFIX, current->pid, sops->sem_num, semid);
+
+    return res;
+}
+#else
+static asmlinkage long (*real_sys_semop)(int semid, struct sembuf __user *sops, unsigned nsops);
+
+static asmlinkage int hook_sys_semop(int semid, struct sembuf __user *sops, unsigned nsops)
+{
+    int res = real_sys_semop(semid, sops, nsops);
+
+	pr_info("%s%s: Proccess %d operate with %d semafore on semid %d\n", PREFIX, SEMPREFIX, current->pid, sops->sem_num, semid);
+
+    return res;
+}
+#endif
+
+// SYS_SEMCTL
+#ifdef PTREGS_SYSCALL_STUBS
+static asmlinkage long (*real_sys_semctl)(const struct pt_regs *);
+
+static asmlinkage int hook_sys_semctl(const struct pt_regs *regs)
+{
+    int res = real_sys_semctl(regs);
+
+	int semid = regs->di;
+	int semnum = regs->si;
+	int cmd = regs->dx;
+	unsigned long arg = regs->r10;
+
+	pr_info("%s%s: Proccess %d semctl with %d semafore on semid %d\n", PREFIX, SEMPREFIX, current->pid, semnum, semid);
+
+    return res;
+}
+#else
+static asmlinkage long (*real_sys_semctl)(int semid, int semnum, int cmd, unsigned long arg);
+
+static asmlinkage int hook_sys_semctl(int semid, int semnum, int cmd, unsigned long arg)
+{
+    int res = real_sys_semctl(semid, semnum, cmd, arg);
+
+	pr_info("%s%s: Proccess %d semctl with %d semafore on semid %d\n", PREFIX, SEMPREFIX, current->pid, semnum, semid);
+
+    return res;
+}
+#endif
+
+// SYS_PIPE
+#ifdef PTREGS_SYSCALL_STUBS
+static asmlinkage long (*real_sys_pipe)(const struct pt_regs *);
+
+static asmlinkage int hook_sys_pipe(const struct pt_regs *regs)
+{
+    int res = real_sys_pipe(regs);
+
+	int __user *fildes = regs->di;
+
+	if (res == 0)
+	{
+		// task пройтись по родственникам и вывести все их и можно сказать, что они общаются через pipe
+		pr_info("%s%s: Proccess %d create pipe fd: %llu\n", PREFIX, PIPEPREFIX, current->pid, fildes);
+	}
+
+    return res;
+}
+#else
+static asmlinkage long (*real_sys_pipe)(int __user *fildes);
+
+static asmlinkage int hook_sys_pipe(int __user *fildes)
+{
+    int res = real_sys_pipe(fildes);
+
+	// task пройтись по родственникам и вывести все их и можно сказать, что они общаются через pipe
+	if (res == 0)
+	{
+		// task пройтись по родственникам и вывести все их и можно сказать, что они общаются через pipe
+		pr_info("%s%s: Proccess %d create pipe fd: %llu\n", PREFIX, PIPEPREFIX, current->pid, fildes);
+	}
+
+    return res;
+}
+#endif
+
+// SYS_PIPE2
+#ifdef PTREGS_SYSCALL_STUBS
+static asmlinkage long (*real_sys_pipe2)(const struct pt_regs *);
+
+static asmlinkage int hook_sys_pipe2(const struct pt_regs *regs)
+{
+    int res = real_sys_pipe(regs);
+
+	int __user *fildes = regs->di;
+
+	if (res == 0)
+	{
+		// task пройтись по родственникам и вывести все их и можно сказать, что они общаются через pipe
+		//pr_info("%s%s: Proccess %d create pipe fd: %llu\n", PREFIX, PIPEPREFIX, current->pid, fildes);
+	}
+
+    return res;
+}
+#else
+static asmlinkage long (*real_sys_pipe2)(int __user *fildes, int flags);
+
+static asmlinkage int hook_sys_pipe2(int __user *fildes, int flags)
+{
+    int res = real_sys_pipe2(fildes, flags);
+
+	if (res == 0)
+	{
+		// task пройтись по родственникам и вывести все их и можно сказать, что они общаются через pipe
+		// pr_info("%s%s: Proccess %d create pipe fd: %llu\n", PREFIX, PIPEPREFIX, current->pid, fildes);
+	}
+
+    return res;
 }
 #endif
 
@@ -396,7 +490,11 @@ static asmlinkage int hook_sys_semget(key_t key, int nsems, int semflg)
 static struct ftrace_hook hooks[] = {
     HOOK("sys_kill",  hook_sys_kill,  &real_sys_kill),
 	HOOK("sys_signal",  hook_sys_signal,  &real_sys_signal),
-	HOOK("sys_semget",  hook_sys_semget,  &real_sys_semget)
+	HOOK("sys_semget",  hook_sys_semget,  &real_sys_semget),
+	HOOK("sys_semop",  hook_sys_semop,  &real_sys_semop),
+	HOOK("sys_semctl",  hook_sys_semctl,  &real_sys_semctl),
+	HOOK("sys_pipe",  hook_sys_pipe, &real_sys_pipe),
+	HOOK("sys_pipe2",  hook_sys_pipe2, &real_sys_pipe2),
 };
 
 int install_hooks()
