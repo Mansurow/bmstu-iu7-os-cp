@@ -48,6 +48,8 @@ static struct proc_dir_entry *proc_sighand_file = NULL;
 static struct proc_dir_entry *proc_memory_file = NULL;
 static struct proc_dir_entry *proc_maps_file = NULL;
 static struct proc_dir_entry *proc_pipe_file = NULL;
+static struct proc_dir_entry *proc_sem_file = NULL;
+static struct proc_dir_entry *proc_shm_file = NULL;
 
 static int mt_pid = -1;
 
@@ -56,20 +58,8 @@ static char sighand_info[LOG_SIZE] = { 0 };
 static char memory_info[LOG_SIZE] = { 0 };
 static char maps_info[LOG_SIZE] = { 0 };
 static char pipes_info[LOG_SIZE] = { 0 };
-
-// static int check_overflow(char *fString, char *sString, int maxSize)
-// {
-//     int sumLen = strlen(fString) + strlen(sString);
-//
-//     if (sumLen >= maxSize)
-//     {
-//         printk(KERN_ERR "%s not enough space in log (%d needed but %d available)\n", PREFIX, sumLen, maxSize);
-//
-//         return -ENOMEM;
-//     }
-//
-//     return 0;
-// }
+static char sem_info[LOG_SIZE] = { 0 };
+static char shm_info[LOG_SIZE] = { 0 };
 
 static void print_page(struct page *page)
 {
@@ -134,28 +124,6 @@ static void print_info_mm(pid_t pid, struct mm_struct *info_about_mem)
         return;
     }
 
-
-    atomic_t mm_users; 
-	int counter;
-
-	mm_users = info_about_mem->mm_users; /* Счетчик использования адресного пространства */
-	counter = mm_users.counter;
-
-	unsigned long total_vm_old = info_about_mem->total_vm;
-	unsigned long locked_vm_old = info_about_mem->locked_vm;
-	int map_count_old = info_about_mem->map_count;
-	unsigned long all_brk_old = info_about_mem->brk - info_about_mem->start_brk;
-
-	printk(KERN_INFO "%s[Memory][%d]: Количество процессов, в которых используется данное адресное пространство: %d", PREFIX, pid, counter);
-
-	printk(KERN_INFO "%s[Memory][%d]: Общее количество страниц памяти = %lu ", PREFIX, pid, total_vm_old);
-	printk(KERN_INFO "%s[Memory][%d]: Количество заблокированных страниц памяти = %lu ", PREFIX, pid, locked_vm_old);
-	printk(KERN_INFO "%s[Memory][%d]: Количество областей памяти: %d", PREFIX, pid, map_count_old);
-
-	printk(KERN_INFO "%s[Memory][%d]: Используется сегментом кучи: %lu", PREFIX, pid, all_brk_old);
-	printk(KERN_INFO "%s[Memory][%d]: Используется сегментом кода: %lu", PREFIX, pid, info_about_mem->end_code - info_about_mem->start_code);
-	printk(KERN_INFO "%s[Memory][%d]: Используется сегментом данных: %lu", PREFIX, pid, info_about_mem->end_data - info_about_mem->start_data);
-
     // struct vm_area_struct *vma = info_about_mem->mmap;
 
     // unsigned long vaddr;
@@ -215,33 +183,52 @@ static ssize_t show_sighand_info(void) {
     return strlen;
 }
 
-static ssize_t show_memory_info(void) {
-    int strlen = 0;
-
-    strlen += sprintf(memory_info + strlen, "%7s %7s %10s %10s %10s %10s %10s %7s %10s %10s %10s %10s %10s\n", 
-        "PID", "MMUSERS", "TOTAL VM", "LOCKED VM", "DATA VM", "EXEC VM", "STACK VM", "MAPS", "HEAP", "CODE", "DATA", "ARGS", "ENV");
-
-    struct task_struct *task = &init_task;
-
-    do 
+static void cmd_to_str(char *cmdname, int cmd)
+{
+    if (cmd == IPC_STAT)
     {
-        struct mm_struct *mm = task->mm;
-
-        if (mm != NULL)
-        {
-            unsigned long brk = mm->brk - mm->start_brk; 
-            unsigned long code = mm->end_code - mm->start_code;   
-            unsigned long data = mm->end_data - mm->start_data;
-            unsigned long args = mm->arg_end - mm->arg_start;
-            unsigned long env = mm->env_end - mm->env_start;
-
-            strlen += sprintf(memory_info + strlen, "%7d %7d %10lu %10lu %10lu %10lu %10lu %7d %10lu %10lu %10lu %10lu %10lu\n", 
-                task->pid, mm->mm_users.counter, mm->total_vm, mm->locked_vm, mm->data_vm, mm->exec_vm, mm->stack_vm, mm->map_count, brk, code, data, args, env);
-        }
+        sprintf(cmdname, "%s", "IPC_STAT");
+    } 
+    else if (cmd == IPC_SET)
+    {
+        sprintf(cmdname, "%s", "IPC_SET");
     }
-    while ((task = next_task(task)) != &init_task);
-
-    return strlen;
+    else if (cmd == IPC_RMID)
+    {
+        sprintf(cmdname, "%s", "IPC_RMID");
+    }
+    else if (cmd == GETALL)
+    {
+        sprintf(cmdname, "%s", "GETALL");
+    }
+    else if (cmd== GETNCNT)
+    {
+        sprintf(cmdname, "%s", "GETNCNT");
+    }
+    else if (cmd == GETPID)
+    {
+        sprintf(cmdname, "%s", "GETPID");
+    }
+    else if (cmd == GETVAL)
+    {
+        sprintf(cmdname, "%s", "GETZCNT");
+    }
+    else if (cmd == GETVAL)
+    {
+        sprintf(cmdname, "%s", "GETZCNT");
+    }
+    else if (cmd == SETALL)
+    {
+        sprintf(cmdname, "%s", "SETALL");
+    }
+    else if (cmd == SETVAL)
+    {
+        sprintf(cmdname, "%s", "SETVAL");
+    }
+    else 
+    {
+        sprintf(cmdname, "%s", "?");
+    }
 }
 
 static ssize_t show_general_info(void)
@@ -429,22 +416,45 @@ static ssize_t memory_read(struct file *file, char __user *buf, size_t len, loff
     if (*fPos > 0)
         return 0;
 
-    ssize_t logLen = show_memory_info();
+    ssize_t strlen = 0;
+
+    strlen += sprintf(memory_info + strlen, "%7s %7s %10s %10s %10s %10s %10s %7s %10s %10s %10s %10s %10s\n", 
+        "PID", "MMUSERS", "TOTAL VM", "LOCKED VM", "DATA VM", "EXEC VM", "STACK VM", "MAPS", "HEAP", "CODE", "DATA", "ARGS", "ENV");
+
+    struct task_struct *task = &init_task;
+
+    do 
+    {
+        struct mm_struct *mm = task->mm;
+
+        if (mm != NULL)
+        {
+            unsigned long brk = mm->brk - mm->start_brk; 
+            unsigned long code = mm->end_code - mm->start_code;   
+            unsigned long data = mm->end_data - mm->start_data;
+            unsigned long args = mm->arg_end - mm->arg_start;
+            unsigned long env = mm->env_end - mm->env_start;
+
+            strlen += sprintf(memory_info + strlen, "%7d %7d %10lu %10lu %10lu %10lu %10lu %7d %10lu %10lu %10lu %10lu %10lu\n", 
+                task->pid, mm->mm_users.counter, mm->total_vm, mm->locked_vm, mm->data_vm, mm->exec_vm, mm->stack_vm, mm->map_count, brk, code, data, args, env);
+        }
+    }
+    while ((task = next_task(task)) != &init_task);
 
     printk(KERN_INFO "%s: read called\n", PREFIX);
 
-    if (copy_to_user(buf, memory_info, logLen))
+    if (copy_to_user(buf, memory_info, strlen))
     {
         printk(KERN_ERR "%s: copy_to_user error\n", PREFIX);
 
         return -EFAULT;
     }
 
-    *fPos += logLen;
+    *fPos += strlen;
 
     memset(memory_info, 0, LOG_SIZE);
 
-    return logLen;
+    return strlen;
 }
 
 
@@ -572,58 +582,30 @@ static ssize_t pipe_read(struct file *file, char __user *buf, size_t len, loff_t
 
     ssize_t strlen = 0;
 
-    strlen += sprintf(pipes_info + strlen, "%7s %18s %7s %s\n", "PID", "addr", "COUNT", "SPIDS");
+    strlen += sprintf(pipes_info + strlen, "%7s %18s %7s %s\n", "PID", "FD", "COUNT", "SPIDS");
     
-    // pnode *head = pipe_info_list.head;
+    pnode *head = pipe_info_list.head;
 
-    // char temp[TEMP_STRING_SIZE] = { 0 };
+    char temp[TEMP_STRING_SIZE] = { 0 };
 
-    // for (; head; head = head->next)
-    // {
-    //     int count = 0;
-    //     ssize_t clen = 0;
-
-    //     childnode_t *chead = head->children; 
-
-    //     for (; chead; chead = chead->next)
-    //     {
-    //         clen += sprintf(temp + clen, "%d,", chead->pid);
-    //         count++;
-    //     }
-
-    //     strlen += sprintf(pipes_info + strlen, "%7d 0x%p %7d %s\n",
-    //         head->ppid, head->fd, count, temp);
-
-    //     memset(temp, 0, TEMP_STRING_SIZE);     
-    // }
-
-    semnode *head = sem_info_list->head;
     for (; head; head = head->next)
     {
-        strlen += sprintf(pipes_info + strlen, "%7d %7d %7d %7d %7d %7d\n",
-            head->info.pid, head->info.semid, head->info.semnum, head->info.semflg, head->info.lastcmd, head->info.value);    
+        int count = 0;
+        ssize_t clen = 0;
+
+        childnode_t *chead = head->children; 
+
+        for (; chead; chead = chead->next)
+        {
+            clen += sprintf(temp + clen, "%d,", chead->pid);
+            count++;
+        }
+
+        strlen += sprintf(pipes_info + strlen, "%7d %18llu %7d %s\n",
+            head->ppid, head->fd, count, temp);
+
+        memset(temp, 0, TEMP_STRING_SIZE);     
     }
-
-
-
-    // struct task_struct *task = &init_task;
-
-    // do 
-    // {
-    //     struct sysv_sem *sems = &(task->sysvsem);
-    //     struct sem_undo_list *undo_list = sems->undo_list;
-    //     struct list_head *undos = &(undo_list->list_proc);
-
-    //     struct sem_undo *pos, *q;
-
-    //     list_for_each_entry_safe(pos, q, &undos, list_proc)
-    //     {
-
-    //         // pr_info("%s%s: pid = %d, semid = %d\n", PREFIX, SEMPREFIX, task->pid, undo->semid);
-    //     }
-    // }
-    // while ((task = next_task(task)) != &init_task);
-
 
     if (copy_to_user(buf, pipes_info, strlen))
     {
@@ -633,6 +615,128 @@ static ssize_t pipe_read(struct file *file, char __user *buf, size_t len, loff_t
     }
 
     memset(pipes_info, 0, LOG_SIZE);
+
+    *fPos += strlen;
+
+    return strlen;
+}
+
+
+static int sem_open(struct inode *spInode, struct file *spFile)
+{
+    pr_info("%s%s: sem_open called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static int sem_release(struct inode *spInode, struct file *spFile)
+{
+    pr_info("%s%s: sem_release called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static ssize_t sem_write(struct file *file, const char __user *ubuf, size_t len, loff_t *fPos)
+{
+    pr_info("%s%s: sen_write called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static ssize_t sem_read(struct file *file, char __user *buf, size_t len, loff_t *fPos)
+{
+    pr_info("%s%s: sem_read called\n", PREFIX, FORTUNEPREFIX);
+
+    if (*fPos > 0)
+        return 0;
+
+    ssize_t strlen = 0;
+
+    strlen += sprintf(sem_info + strlen, "%7s %7s %7s %7s %7s %7s\n", "PID", "SEMID", "SEMNUM", "FLAGS", "CMD", "VALUE");
+    
+    semnode *head = sem_info_list->head;
+    for (; head; head = head->next)
+    {
+        char command[10] = { 0 };    
+        cmd_to_str(command, head->info.lastcmd);
+
+        strlen += sprintf(sem_info + strlen, "%7d %7d %7d %7d %7s %7d\n",
+            head->info.pid, head->info.semid, head->info.semnum, head->info.semflg, command, head->info.value);    
+    }
+
+    if (copy_to_user(buf, sem_info, strlen))
+    {
+        printk(KERN_ERR "%s%s: copy_to_user error\n", PREFIX, FORTUNEPREFIX);
+
+        return -EFAULT;
+    }
+
+    memset(sem_info, 0, LOG_SIZE);
+
+    *fPos += strlen;
+
+    return strlen;
+}
+
+
+static int shm_open(struct inode *spInode, struct file *spFile)
+{
+    pr_info("%s%s: shm_open called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static int shm_release(struct inode *spInode, struct file *spFile)
+{
+    pr_info("%s%s: shm_release called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static ssize_t shm_write(struct file *file, const char __user *ubuf, size_t len, loff_t *fPos)
+{
+    pr_info("%s%s: shm_write called\n", PREFIX, FORTUNEPREFIX);
+
+    return 0;
+}
+
+static ssize_t shm_read(struct file *file, char __user *buf, size_t len, loff_t *fPos)
+{
+    pr_info("%s%s: shm_read called\n", PREFIX, FORTUNEPREFIX);
+
+    if (*fPos > 0)
+        return 0;
+
+    ssize_t strlen = 0;
+
+    strlen += sprintf(shm_info + strlen, "%7s %7s %10s %14s %7s\n", "PID", "SHMID", "CMD", "SIZE", "ADDR");
+    
+    shmnode *head = shm_info_list->head;
+    for (; head; head = head->next)
+    {
+        char command[10] = { 0 };    
+        cmd_to_str(command, head->info.lastcmd);
+
+        if (head->info.addr == NULL)
+        {
+            strlen += sprintf(shm_info + strlen, "%7d %7d %10s %14llu %s\n",
+                head->info.pid, head->info.shmid, command, head->info.size, "?"); 
+        }
+        else
+        { 
+            strlen += sprintf(shm_info + strlen, "%7d %7d %10s %14llu 0x%p\n",
+                head->info.pid, head->info.shmid, command, head->info.size, head->info.addr);
+        }
+    }
+
+    if (copy_to_user(buf, shm_info, strlen))
+    {
+        printk(KERN_ERR "%s%s: copy_to_user error\n", PREFIX, FORTUNEPREFIX);
+
+        return -EFAULT;
+    }
+
+    memset(shm_info, 0, LOG_SIZE);
 
     *fPos += strlen;
 
@@ -682,12 +786,19 @@ static struct proc_ops pipe_ops = {
     .proc_release = pipe_release,
 };
 
-// static struct proc_ops sem_ops = {
-//     .proc_open = sem_open,
-//     .proc_read = sem_read,
-//     .proc_write = sem_write,
-//     .proc_release = sem_release,
-// };
+static struct proc_ops sem_ops = {
+    .proc_open = sem_open,
+    .proc_read = sem_read,
+    .proc_write = sem_write,
+    .proc_release = sem_release,
+};
+
+static struct proc_ops shm_ops = {
+    .proc_open = shm_open,
+    .proc_read = shm_read,
+    .proc_write = shm_write,
+    .proc_release = shm_release,
+};
 
 static void free_proc(void)
 {
@@ -701,7 +812,13 @@ static void free_proc(void)
         remove_proc_entry(SIGHANDFILENAME, proc_main_dir); 
 
     if (proc_pipe_file != NULL)
-        remove_proc_entry(PIPEFILENAME, proc_main_dir); 
+        remove_proc_entry(PIPEFILENAME, proc_main_dir);
+
+    if (proc_sem_file != NULL)
+        remove_proc_entry(SEMFILENAME, proc_main_dir);
+
+    if (proc_shm_file != NULL)
+        remove_proc_entry(SHMFILENAME, proc_main_dir);         
 
     if (proc_memory_file != NULL)
         remove_proc_entry(MEMORYFILENAME, proc_main_dir); 
@@ -716,12 +833,22 @@ static void free_proc(void)
         remove_proc_entry(MAINDIRNAME, NULL);
 }
 
+static void free_lists(void)
+{
+    free_plist(&pipe_info_list);
+    free_semlist(sem_info_list);
+    free_shmlist(shm_info_list);
+
+    kfree(sem_info_list);
+    kfree(shm_info_list);
+}
+
+
 static int init_proc(void)
 {
     if ((proc_main_dir = proc_mkdir(MAINDIRNAME, NULL)) == NULL)
     {
         printk(KERN_ERR "create main dir error\n");
-        free_proc();
 
         return -ENOMEM;
     }
@@ -729,7 +856,20 @@ static int init_proc(void)
     if (!(proc_general_file = proc_create(GENERALFILENAME, 0666, proc_main_dir, &general_ops)))
     {
         printk(KERN_ERR "%s: create general file error\n", PREFIX);
-        free_proc();
+
+        return -ENOMEM;
+    }
+
+    if (!(proc_sem_file = proc_create(SEMFILENAME, 0666, proc_main_dir, &sem_ops)))
+    {
+        printk(KERN_ERR "%s: create sem file error\n", PREFIX);
+
+        return -ENOMEM;
+    }
+
+    if (!(proc_shm_file = proc_create(SHMFILENAME, 0666, proc_main_dir, &shm_ops)))
+    {
+        printk(KERN_ERR "%s: create shm file error\n", PREFIX);
 
         return -ENOMEM;
     }
@@ -737,7 +877,6 @@ static int init_proc(void)
     if (!(proc_pipe_file = proc_create(PIPEFILENAME, 0666, proc_main_dir, &pipe_ops)))
     {
         printk(KERN_ERR "%s: create pipe file error\n", PREFIX);
-        free_proc();
 
         return -ENOMEM;
     }
@@ -745,7 +884,6 @@ static int init_proc(void)
     if (!(proc_memory_file = proc_create(MEMORYFILENAME, 0666, proc_main_dir, &memory_ops)))
     {
         printk(KERN_ERR "%s: create memory file error\n", PREFIX);
-        free_proc();
 
         return -ENOMEM;
     }
@@ -753,7 +891,6 @@ static int init_proc(void)
     if (!(proc_maps_file = proc_create(MAPSFILENAME, 0666, proc_main_dir, &maps_ops)))
     {
         printk(KERN_ERR "%s: create maps for process file error\n", PREFIX);
-        free_proc();
 
         return -ENOMEM;
     }
@@ -761,7 +898,6 @@ static int init_proc(void)
     if (!(proc_sighand_file = proc_create(SIGHANDFILENAME, 0666, proc_main_dir, &sighand_ops)))
     {
         printk(KERN_ERR "%s: create signals file error\n", PREFIX);
-        free_proc();
 
         return -ENOMEM;
     }
@@ -769,7 +905,6 @@ static int init_proc(void)
     if ((proc_logs_dir = proc_mkdir(LOGSDIRNAME, proc_main_dir)) == NULL)
     {
         printk(KERN_ERR "create main dir error\n");
-        free_proc();
 
         return -ENOMEM;
     }
@@ -777,7 +912,6 @@ static int init_proc(void)
     if (!(proc_signal_logs_file = proc_create(SIGNALFILENAME, 0666, proc_logs_dir, &signal_logs_ops)))
     {
         printk(KERN_ERR "%s create signal logs file error\n", PREFIX);
-        free_proc();
 
         return -ENOMEM;
     }
@@ -785,20 +919,43 @@ static int init_proc(void)
     return 0;
 }
 
-static int __init md_init(void)
+static int alloc_lists(void)
 {
-    int err;
-
     sem_info_list = (semlist *) kmalloc(sizeof(semlist), GFP_KERNEL);
     if (sem_info_list == NULL)
     {
         return -1;
     }
 
+    shm_info_list = (shmlist *) kmalloc(sizeof(shmlist), GFP_KERNEL);
+    if (shm_info_list == NULL)
+    {
+        return -1;
+    }
+
+
+    init_semlist(sem_info_list);
+    init_shmlist(shm_info_list);
+
+    return 0;
+}
+
+
+static int __init md_init(void)
+{
+    int err;
+
+    err = alloc_lists();
+    if (err)
+    {
+        return err;
+    }
 
     err = init_proc();
     if (err)
     {
+        free_proc();
+        free_lists();
         return err;
     }
 
@@ -807,7 +964,8 @@ static int __init md_init(void)
     {
         printk(KERN_ERR "%s install_hooks error\n", PREFIX);
         free_proc();
-        
+        free_lists();
+
         return err;
     }
 
@@ -820,10 +978,7 @@ static void __exit md_exit(void)
 {
     remove_hooks();
     free_proc();
-    free_plist(&pipe_info_list);
-    free_semlist(sem_info_list);
-
-    kfree(sem_info_list);
+    free_lists();
 
     pr_info("%s: module unloaded!\n", PREFIX);
 }

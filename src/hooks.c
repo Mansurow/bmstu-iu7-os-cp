@@ -9,10 +9,12 @@ extern plist pipe_info_list = {
 };
 
 extern semlist *sem_info_list = NULL;
+extern shmlist *shm_info_list = NULL;
 
 static DEFINE_SPINLOCK(signal_logs_lock);
 static DEFINE_SPINLOCK(pipe_lock);
 static DEFINE_SPINLOCK(sem_lock);
+static DEFINE_SPINLOCK(shm_lock);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
 static unsigned long lookup_name(const char *name)
@@ -319,20 +321,11 @@ static asmlinkage int hook_sys_signal(int sig, __sighandler_t handler);
 #endif
 
 // SYS_SEMGET
-#ifdef PTREGS_SYSCALL_STUBS
-static asmlinkage long (*real_sys_semget)(const struct pt_regs *);
-
-static asmlinkage int hook_sys_semget(const struct pt_regs *regs)
+static void get_sem_info(int semid, int nsems, int semflg)
 {
-    int semid = real_sys_semget(regs);
-
-	key_t key = regs->di;
-	int nsem = regs->si;
-	int semflg = regs->dx;
-
 	spin_lock(&sem_lock);
 
-	for (int semnum = 0; semnum < nsem; semnum++)
+	for (int semnum = 0; semnum < nsems; semnum++)
 	{
 		sem_info_t info = {
 			.semid = semid,
@@ -347,8 +340,28 @@ static asmlinkage int hook_sys_semget(const struct pt_regs *regs)
 	}
 
 	spin_unlock(&sem_lock);
-	
-	pr_info("%s%s: Proccess %d create or get %d semafores with semid %d\n", PREFIX, SEMPREFIX, current->pid, nsem, semid);
+}
+
+#ifdef PTREGS_SYSCALL_STUBS
+static asmlinkage long (*real_sys_semget)(const struct pt_regs *);
+
+static asmlinkage int hook_sys_semget(const struct pt_regs *regs)
+{
+    int semid = real_sys_semget(regs);
+
+	key_t key = regs->di;
+	int nsems = regs->si;
+	int semflg = regs->dx;
+
+	if (semid == -1)
+	{
+		pr_err("%s%s: Proccess %d can't create or get %d semafores\n", PREFIX, SEMPREFIX, current->pid, nsems);
+	}
+	else
+	{
+		get_sem_info(semid, nsems, semflg);
+		pr_info("%s%s: Proccess %d create or get %d semafores with semid %d\n", PREFIX, SEMPREFIX, current->pid, nsems, semid);
+	}
 
     return semid;
 }
@@ -359,13 +372,38 @@ static asmlinkage int hook_sys_semget(key_t key, int nsems, int semflg)
 {
     int semid = real_sys_semget(key, nsems, semflg);
 
-	pr_info("%s%s: Proccess %d create or get %d semafores with semid %d\n", PREFIX, SEMPREFIX, current->pid, nsem, semid);
+	if (semid == -1)
+	{
+		pr_err("%s%s: Proccess %d can't create or get %d semafores\n", PREFIX, SEMPREFIX, current->pid, nsems);
+	}
+	else
+	{
+		get_sem_info(semid, nsems, semflg);
+		pr_info("%s%s: Proccess %d create or get %d semafores with semid %d\n", PREFIX, SEMPREFIX, current->pid, nsems, semid);
+	}
 
     return semid;
 }
 #endif
 
 // SYS_SEMOP
+static void update_semop_info(int semid, struct sembuf __user *sops)
+{
+	spin_lock(&sem_lock);
+
+	semnode *head = sem_info_list->head;
+
+	for(;head; head = head->next)
+	{
+		if (head->info.semid == semid && head->info.semnum == sops->sem_num)
+		{
+			head->info.value += sops->sem_op;
+		} 
+	}
+
+	spin_unlock(&sem_lock);
+}
+
 #ifdef PTREGS_SYSCALL_STUBS
 static asmlinkage long (*real_sys_semop)(const struct pt_regs *);
 
@@ -376,8 +414,16 @@ static asmlinkage int hook_sys_semop(const struct pt_regs *regs)
 	int semid = regs->di;
 	struct sembuf __user *sops = regs->si;
 	unsigned nsops = regs->dx;
-
-	pr_info("%s%s: Proccess %d operate with %d semafore on semid %d\n", PREFIX, SEMPREFIX, current->pid, sops->sem_num, semid);
+	
+	if (res == -1)
+	{
+		pr_err("%s%s: Proccess %d can't operate with %d semafore on semid %d\n", PREFIX, SEMPREFIX, current->pid, sops->sem_num, semid);
+	}
+	else
+	{
+		update_semop_info(semid, sops);
+		pr_info("%s%s: Proccess %d operate with %d semafore on semid %d\n", PREFIX, SEMPREFIX, current->pid, sops->sem_num, semid);
+	}
 
     return res;
 }
@@ -388,8 +434,15 @@ static asmlinkage int hook_sys_semop(int semid, struct sembuf __user *sops, unsi
 {
     int res = real_sys_semop(semid, sops, nsops);
 
-	pr_info("%s%s: Proccess %d operate with %d semafore on semid %d\n", PREFIX, SEMPREFIX, current->pid, sops->sem_num, semid);
-
+	if (res == -1)
+	{
+		pr_err("%s%s: Proccess %d can't operate with %d semafore on semid %d\n", PREFIX, SEMPREFIX, current->pid, sops->sem_num, semid);
+	}
+	else
+	{
+		update_semop_info(semid, sops);
+		pr_info("%s%s: Proccess %d operate with %d semafore on semid %d\n", PREFIX, SEMPREFIX, current->pid, sops->sem_num, semid);
+	}
     return res;
 }
 #endif
@@ -425,7 +478,7 @@ static asmlinkage int hook_sys_semtimedop(int semid, struct sembuf __user *sops,
 
 
 // SYS_SEMCTL
-static void update_sem_info(int semid, int semnum, int cmd, unsigned long arg)
+static void update_semctl_info(int semid, int semnum, int cmd, unsigned long arg)
 {
 	spin_lock(&sem_lock);	
 	
@@ -451,7 +504,7 @@ static void update_sem_info(int semid, int semnum, int cmd, unsigned long arg)
 				else if (cmd == SETALL || cmd == GETALL)
 				{
 					head->info.value = values[head->info.semnum - 1];	
-				}	
+				} 	
 
 				head->info.lastcmd = cmd;
 			} 
@@ -476,7 +529,7 @@ static asmlinkage int hook_sys_semctl(const struct pt_regs *regs)
 	unsigned long arg = regs->r10;
 
 	if (res == 0)
-		update_sem_info(semid, semnum, cmd, arg);
+		update_semctl_info(semid, semnum, cmd, arg);
 
     return res;
 }
@@ -488,7 +541,7 @@ static asmlinkage int hook_sys_semctl(int semid, int semnum, int cmd, unsigned l
     int res = real_sys_semctl(semid, semnum, cmd, arg);
 
 	if (res == 0)
-		update_sem_info(semid, semnum, cmd, arg);
+		update_semctl_info(semid, semnum, cmd, arg);
 
     return res;
 }
@@ -619,6 +672,22 @@ static asmlinkage int hook_sys_close(unsigned int fd)
 #endif
 
 // SYS_SHMGET
+static void get_shm_info(int shmid, size_t size)
+{
+	spin_lock(&shm_lock);
+
+	shm_info_t info = {
+		.pid = current->pid,
+		.shmid = shmid,
+		.size = size,
+		.addr = NULL,
+		.lastcmd = -1
+	};
+
+	push_bask_shmlist(shm_info_list, info);
+
+	spin_unlock(&shm_lock);
+}
 #ifdef PTREGS_SYSCALL_STUBS
 static asmlinkage long (*real_sys_shmget)(const struct pt_regs *);
 
@@ -628,10 +697,17 @@ static asmlinkage int hook_sys_shmget(const struct pt_regs *regs)
 
 	key_t key = regs->di;
 	size_t size = regs->si;
-	int flag = regs->dx;
 
-	pr_info("%s%s: Proccess %d create or get shm %d on %lu size\n", PREFIX, SHMPREFIX, current->pid, shmid, size);
+	if (shmid == -1)
+	{
 
+	}
+	else
+	{
+		get_shm_info(shmid, size);
+
+		pr_info("%s%s: Proccess %d create or get shm %d on %lu size\n", PREFIX, SHMPREFIX, current->pid, shmid, size);
+	}
     return shmid;
 }
 #else
@@ -641,13 +717,54 @@ static asmlinkage int hook_sys_shmget(key_t key, size_t size, int flag)
 {
     int shmid = real_sys_shmget(key, size, flag);
 
-	pr_info("%s%s: Proccess %d create or get shm %d on %lu size\n", PREFIX, SHMPREFIX, current->pid, shmid, size);
+	if (shmid == -1)
+	{
+
+	}
+	else
+	{
+		get_shm_info(shmid, size);
+
+		pr_info("%s%s: Proccess %d create or get shm %d on %lu size\n", PREFIX, SHMPREFIX, current->pid, shmid, size);
+	}
 
     return shmid;
 }
 #endif
 
 // SYS_SHMAT
+static void update_shmat_info(int shmid, char __user *shmaddr)
+{
+	spin_lock(&shm_lock);
+
+	shmnode* node = get_shmnode(shm_info_list, current->pid);
+
+	if (node != NULL)
+	{
+		node->info.addr = shmaddr;
+	}	
+	else
+	{
+		shmnode *node = get_first_shmnode(shm_info_list, shmid);
+
+		size_t size = 0;
+
+		if (node != NULL)
+			size = node->info.size;
+
+		shm_info_t info = {
+			.pid = current->pid,
+			.shmid = shmid,
+			.size = 0,
+			.addr = shmaddr,
+			.lastcmd = -1
+		};
+
+		push_bask_shmlist(shm_info_list, info);
+	}
+	spin_unlock(&shm_lock);
+}
+
 #ifdef PTREGS_SYSCALL_STUBS
 static asmlinkage long (*real_sys_shmat)(const struct pt_regs *);
 
@@ -659,7 +776,15 @@ static asmlinkage long hook_sys_shmat(const struct pt_regs *regs)
 
 	long addr = real_sys_shmat(regs);
 
-	pr_info("%s%s: Proccess %d was attached to %d shm - addr - %lu\n", PREFIX, SHMPREFIX, current->pid, shmid, addr);
+	if (addr < 0)
+	{
+
+	} 
+	else
+	{
+		update_shmat_info(shmid, addr);
+		pr_info("%s%s: Proccess %d was attached to %d shm - addr - %lu\n", PREFIX, SHMPREFIX, current->pid, shmid, addr);
+	}
 
     return addr;
 }
@@ -677,6 +802,20 @@ static asmlinkage long hook_sys_shmat(int shmid, char __user *shmaddr, int shmfl
 #endif
 
 // SYS_SHMDT
+static void update_shmdt_info(char __user *shmaddr)
+{
+	spin_lock(&shm_lock);
+
+	shmnode* node = get_shmnode(shm_info_list, current->pid);
+
+	if (node != NULL)
+	{
+		node->info.addr = NULL;
+	}
+
+	spin_unlock(&shm_lock);
+}
+
 #ifdef PTREGS_SYSCALL_STUBS
 static asmlinkage long (*real_sys_shmdt)(const struct pt_regs *);
 
@@ -686,7 +825,16 @@ static asmlinkage int hook_sys_shmdt(const struct pt_regs *regs)
 
 	char __user *shmaddr = regs->di;
 
-	pr_info("%s%s: Proccess %d was detached shm - addr: %x\n", PREFIX, SHMPREFIX, current->pid, shmaddr);
+	if (res < 0)
+	{
+
+	}
+	else
+	{
+		update_shmdt_info(shmaddr);
+
+		pr_info("%s%s: Proccess %d was detached shm - addr: %x\n", PREFIX, SHMPREFIX, current->pid, shmaddr);
+	}
 
     return res;
 }
@@ -697,13 +845,39 @@ static asmlinkage int real_sys_shmdt(char __user *shmaddr)
 {
     int res = real_sys_shmdt(shmaddr);
 
-	pr_info("%s%s: Proccess %d was detached shm - addr: %x\n", PREFIX, SHMPREFIX, current->pid, shmaddr);
+	if (res < 0)
+	{
+
+	}
+	else
+	{
+		update_shmdt_info(shmaddr);
+
+		pr_info("%s%s: Proccess %d was detached shm - addr: %x\n", PREFIX, SHMPREFIX, current->pid, shmaddr);
+	}
 
     return res;
 }
 #endif
 
 // SYS_SHCTL
+static void update_shmctl_info(int shmid, int cmd, struct shmid_ds __user *buf)
+{
+	spin_lock(&shm_lock);
+
+	shmnode* head = shm_info_list->head;
+
+	for (; head; head = head->next)
+	{
+		if (head->info.shmid == shmid)
+		{
+			head->info.lastcmd = cmd;
+		}
+	}
+
+	spin_unlock(&shm_lock);
+}
+
 #ifdef PTREGS_SYSCALL_STUBS
 static asmlinkage long (*real_sys_shmctl)(const struct pt_regs *);
 
@@ -715,8 +889,15 @@ static asmlinkage int hook_sys_shmctl(const struct pt_regs *regs)
 	int cmd = regs->si;
 	struct shmid_ds __user *buf = regs->dx;
 
-	pr_info("%s%s: Proccess %d was ctl %d shm, cmd: %d\n", PREFIX, SHMPREFIX, current->pid, shmid, cmd);
+	if (res < 0)
+	{
 
+	}
+	else
+	{
+		update_shmctl_info(shmid, cmd, buf);
+		pr_info("%s%s: Proccess %d was ctl %d shm, cmd: %d\n", PREFIX, SHMPREFIX, current->pid, shmid, cmd);
+	}
     return res;
 }
 #else
@@ -750,15 +931,14 @@ static asmlinkage int real_sys_shmctl(int shmid, int cmd, struct shmid_ds __user
 }
 
 static struct ftrace_hook hooks[] = {
-    // HOOK("sys_kill",  hook_sys_kill,  &real_sys_kill),
-	// HOOK("sys_signal",  hook_sys_signal,  &real_sys_signal),
+    HOOK("sys_kill",  hook_sys_kill,  &real_sys_kill),
+	HOOK("sys_signal",  hook_sys_signal,  &real_sys_signal),
 	HOOK("sys_semget",  hook_sys_semget,  &real_sys_semget),
   	HOOK("sys_semop",  hook_sys_semop,  &real_sys_semop),
-	// HOOK("sys_semtimedop",  hook_sys_semtimedop,  &real_sys_semtimedop),
 	HOOK("sys_semctl",  hook_sys_semctl,  &real_sys_semctl),
-	// HOOK("sys_pipe",  hook_sys_pipe, &real_sys_pipe),
-	// HOOK("sys_pipe2",  hook_sys_pipe2, &real_sys_pipe2),
-	// HOOK("sys_close",  hook_sys_close, &real_sys_close),
+	HOOK("sys_pipe",  hook_sys_pipe, &real_sys_pipe),
+	HOOK("sys_pipe2",  hook_sys_pipe2, &real_sys_pipe2),
+	HOOK("sys_close",  hook_sys_close, &real_sys_close),
 	HOOK("sys_shmget",  hook_sys_shmget, &real_sys_shmget),
 	HOOK("sys_shmat",  hook_sys_shmat, &real_sys_shmat),
 	HOOK("sys_shmdt",  hook_sys_shmdt, &real_sys_shmdt),

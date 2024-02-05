@@ -31,8 +31,7 @@ void remove_hooks(void);
 int install_hooks(void);
 
 extern char signal_logs[LOG_SIZE];
-extern struct monitoring_pipe_array pipes;
 extern plist pipe_info_list;
 extern semlist *sem_info_list;
-
+extern shmlist *shm_info_list;
 #endif

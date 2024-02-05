@@ -4,7 +4,7 @@
 #include <linux/signal.h>
 
 #define PID_MAX  4194304
-#define LOG_SIZE 4000000
+#define LOG_SIZE 200000
 #define TEMP_STRING_SIZE 512
 
 #define PREFIX        "[MONITORING]"

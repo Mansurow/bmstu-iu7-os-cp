@@ -162,6 +162,13 @@ semnode *create_semnode(sem_info_t data)
     return node;
 }
 
+void init_semlist(semlist *list)
+{
+    list->len = 0;
+    list->head = NULL;
+    list->tail = NULL;
+}
+
 int push_bask_semlist(semlist *list, sem_info_t data)
 {
     if (list == NULL)
@@ -238,6 +245,212 @@ void free_semlist(semlist *list)
     if (list != NULL && list->head != NULL)
     {
         semnode *next_elem;
+
+        for (;list->head; list->head = next_elem)
+        {
+            next_elem = list->head->next;
+            kfree(list->head);
+        }
+        list->len = 0;
+        list->head = NULL;
+        list->tail = NULL;
+    }
+}
+
+shmnode *create_shmnode(shm_info_t data)
+{
+    shmnode *node  = (shmnode *) kmalloc(sizeof(shmnode), GFP_KERNEL);
+    if (node != NULL)
+    {
+        node->info = data;
+        node->next = NULL;
+        node->prev = NULL;
+    }
+    return node;
+}
+
+void init_shmlist(shmlist *list)
+{
+    list->len = 0;
+    list->head = NULL;
+    list->tail = NULL;
+}
+
+shmnode* get_shmnode(shmlist *list, pid_t pid)
+{
+    shmnode* node = NULL;
+
+    if (list != NULL)
+    {
+        if (list->tail->info.pid == pid)
+        {
+            node = list->tail;
+        }
+        else
+        {
+            bool flag = false;
+            shmnode* head = list->head;
+            
+            for(; head && !flag; head = head->next)
+            {
+                if (head->info.pid == pid)
+                {
+                    node = head;
+                    flag = true;
+                }
+            } 
+        }
+    }
+
+    return node;
+}
+
+shmnode* get_first_shmnode(shmlist *list, int shmid)
+{
+    shmnode* node = NULL;
+
+    if (list != NULL)
+    {
+        bool flag = false;
+        shmnode* head = list->head;
+        
+        for(; head && !flag; head = head->next)
+        {
+            if (head->info.shmid == shmid)
+            {
+                node = head;
+                flag = true;
+            }
+        } 
+    }
+
+    return node;
+}
+
+int push_bask_shmlist(shmlist *list, shm_info_t data)
+{
+    if (list == NULL)
+    {
+        return -1;
+    }
+
+    shmnode *mainnode = get_first_shmnode(list, data.shmid);
+    if (mainnode != NULL)
+    {
+        data.size = mainnode->info.size;
+    }
+
+    shmnode *node = create_shmnode(data);
+    if (node == NULL)
+    {
+        return -1;
+    }
+
+    if (list->head == NULL && list->tail == NULL)
+    {
+        list->head = node;
+    }
+    else
+    {   
+
+        shmnode *tail = list->head;
+        for (;tail->next; tail = tail->next);
+
+        tail->next = node;
+        node->prev = tail;
+    } 
+
+    list->tail = node;   
+    list->len++;
+
+    return 0;
+}
+
+void pop_shmid_shmlist(shmlist *list, int shmid)
+{
+    if (list != NULL)
+    {
+        shmnode *head = list->head;
+
+        for(;head; head = head->next)
+        {
+            if (head->info.shmid == shmid)
+            {
+                shmnode *prev = head->prev;
+                shmnode *curr = head;
+                shmnode *next = head->next;
+
+                if (prev == NULL && next == NULL)
+                {
+                    list->head = NULL;
+                    list->tail = NULL;
+                } 
+                else if (prev == NULL)
+                {
+                    next->prev = prev;
+                    list->head = next;
+                }
+                else if (next == NULL)
+                {
+                    prev->next = next;
+                    list->tail = prev;
+                } else
+                {
+                    prev->next = next;
+                    next->prev = prev;
+                }
+                kfree(curr);
+                list->len--;	
+            }
+        }
+    }
+}
+
+void pop_pid_shmlist(shmlist *list, pid_t pid)
+{
+    if (list != NULL)
+    {
+        shmnode *head = list->head;
+
+        for(;head; head = head->next)
+        {
+            if (head->info.pid == pid)
+            {
+                shmnode *prev = head->prev;
+                shmnode *curr = head;
+                shmnode *next = head->next;
+
+                if (prev == NULL && next == NULL)
+                {
+                    list->head = NULL;
+                    list->tail = NULL;
+                } 
+                else if (prev == NULL)
+                {
+                    next->prev = prev;
+                    list->head = next;
+                }
+                else if (next == NULL)
+                {
+                    prev->next = next;
+                    list->tail = prev;
+                } else
+                {
+                    prev->next = next;
+                    next->prev = prev;
+                }
+                kfree(curr);
+                list->len--;	
+            }
+        }
+    }
+}
+
+void free_shmlist(shmlist *list) 
+{
+    if (list != NULL && list->head != NULL)
+    {
+        shmnode *next_elem;
 
         for (;list->head; list->head = next_elem)
         {
