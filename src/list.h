@@ -18,23 +18,37 @@ typedef struct monitoring_signal_t
     int count_sent;     // количество отправленных сигналов  
 } monitoring_signal_t;
 
-struct monitoring_pipe_t
-{
-    pid_t ppid;
-    int *fd;
-};
-
-struct monitoring_pipe_array
-{
-    int count;
-    struct monitoring_pipe_t array[LOG_SIZE];
-};
-
 typedef struct children_node_t
 {
     pid_t pid;
     struct children_node_t *next;   
 } childnode_t;
+
+
+typedef struct sem_info_t
+{
+    int semid;
+    int semnum;
+    pid_t pid;
+    int semflg;
+    int lastcmd;
+    int value;
+} sem_info_t;
+
+typedef struct sem_node_t
+{
+    struct sem_info_t info;
+    struct sem_node_t *next;
+    struct sem_node_t *prev;
+} semnode;
+
+typedef struct sem_list_t 
+{
+    size_t len;
+    struct sem_node_t *head;
+    struct sem_node_t *tail;
+} semlist;
+
 
 typedef struct pipe_node_t
 {
@@ -45,6 +59,7 @@ typedef struct pipe_node_t
     struct pipe_node_t *next;
 } pnode;
 
+
 typedef struct pipe_list_t 
 {
     size_t len;
@@ -52,15 +67,21 @@ typedef struct pipe_list_t
     struct pipe_node_t *tail;
 } plist;
 
-pnode *create_pnode(pid_t ppid, int *fd, childnode_t *child_list);
-childnode_t *create_childnode(pid_t pid);
 
+childnode_t *create_childnode(pid_t pid);
+int push_bask_childlist(childnode_t **head, pid_t pid);
+void free_childlist(childnode_t **head);
+
+pnode *create_pnode(pid_t ppid, int *fd, childnode_t *child_list);
 void init_plist(plist *list);
 int push_bask_plist(plist *list, pid_t ppid, int *fd, childnode_t *child_list);
-int push_bask_childlist(childnode_t **head, pid_t pid);
 void pop_plist(plist *list, int *fd);
-
 void free_plist(plist *list);
-void free_childlist(childnode_t **head);
+
+semnode *create_semnode(sem_info_t data);
+int push_bask_semlist(semlist *list, sem_info_t data);
+void pop_semlist(semlist *list, int semid);
+void free_semlist(semlist *list);
+
 
 #endif

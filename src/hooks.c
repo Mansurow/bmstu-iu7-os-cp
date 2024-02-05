@@ -8,8 +8,11 @@ extern plist pipe_info_list = {
     .tail = NULL
 };
 
+extern semlist *sem_info_list = NULL;
+
 static DEFINE_SPINLOCK(signal_logs_lock);
 static DEFINE_SPINLOCK(pipe_lock);
+static DEFINE_SPINLOCK(sem_lock);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
 static unsigned long lookup_name(const char *name)
@@ -327,6 +330,24 @@ static asmlinkage int hook_sys_semget(const struct pt_regs *regs)
 	int nsem = regs->si;
 	int semflg = regs->dx;
 
+	spin_lock(&sem_lock);
+
+	for (int semnum = 0; semnum < nsem; semnum++)
+	{
+		sem_info_t info = {
+			.semid = semid,
+			.semnum = semnum + 1,
+			.pid = current->pid,
+			.semflg = semflg,
+			.lastcmd = -1,
+			.value = -1
+		};
+
+		push_bask_semlist(sem_info_list, info);
+	}
+
+	spin_unlock(&sem_lock);
+	
 	pr_info("%s%s: Proccess %d create or get %d semafores with semid %d\n", PREFIX, SEMPREFIX, current->pid, nsem, semid);
 
     return semid;
@@ -373,7 +394,75 @@ static asmlinkage int hook_sys_semop(int semid, struct sembuf __user *sops, unsi
 }
 #endif
 
+// SYS_SEMTIMEDOP
+#ifdef PTREGS_SYSCALL_STUBS
+static asmlinkage long (*real_sys_semtimedop)(const struct pt_regs *);
+
+static asmlinkage int hook_sys_semtimedop(const struct pt_regs *regs)
+{
+    int res = real_sys_semtimedop(regs);
+
+	int semid = regs->di;
+	struct sembuf __user *sops = regs->si;
+	unsigned nsops = regs->dx;
+
+	pr_info("%s%s: Proccess %d operate with %d semafore on semid %d\n", PREFIX, SEMPREFIX, current->pid, sops->sem_num, semid);
+
+    return res;
+}
+#else
+static asmlinkage long (*real_sys_semtimedop)(int semid, struct sembuf __user *sops, unsigned nsops, const struct __kernel_timespec __user *timeout);
+
+static asmlinkage int hook_sys_semtimedop(int semid, struct sembuf __user *sops, unsigned nsops, const struct __kernel_timespec __user *timeout)
+{
+    int res = real_sys_semtimedop(semid, sops, nsops, timeout);
+
+	pr_info("%s%s: Proccess %d operate with %d semafore on semid %d\n", PREFIX, SEMPREFIX, current->pid, sops->sem_num, semid);
+
+    return res;
+}
+#endif
+
+
 // SYS_SEMCTL
+static void update_sem_info(int semid, int semnum, int cmd, unsigned long arg)
+{
+	spin_lock(&sem_lock);	
+	
+	semnode *head = sem_info_list->head;
+
+	ushort *values = NULL;
+
+	if (cmd == SETALL || cmd == GETALL)
+		values = (ushort *) arg;
+
+	if (cmd == IPC_RMID)
+	{
+		pop_semlist(sem_info_list, semid);
+	}
+	else
+	{
+		for(;head; head = head->next)
+		{
+			if (head->info.semid == semid)
+			{
+				if (cmd == SETVAL && head->info.semnum == semnum + 1)
+					head->info.value = arg;
+				else if (cmd == SETALL || cmd == GETALL)
+				{
+					head->info.value = values[head->info.semnum - 1];	
+				}	
+
+				head->info.lastcmd = cmd;
+			} 
+		}
+	}
+	spin_unlock(&sem_lock);
+
+	pr_info("%s%s: Proccess %d semctl with %d semafore on semid %d, value: %d\n", PREFIX, SEMPREFIX, current->pid, semnum, semid, arg);
+
+}
+
 #ifdef PTREGS_SYSCALL_STUBS
 static asmlinkage long (*real_sys_semctl)(const struct pt_regs *);
 
@@ -386,7 +475,8 @@ static asmlinkage int hook_sys_semctl(const struct pt_regs *regs)
 	int cmd = regs->dx;
 	unsigned long arg = regs->r10;
 
-	pr_info("%s%s: Proccess %d semctl with %d semafore on semid %d\n", PREFIX, SEMPREFIX, current->pid, semnum, semid);
+	if (res == 0)
+		update_sem_info(semid, semnum, cmd, arg);
 
     return res;
 }
@@ -397,14 +487,14 @@ static asmlinkage int hook_sys_semctl(int semid, int semnum, int cmd, unsigned l
 {
     int res = real_sys_semctl(semid, semnum, cmd, arg);
 
-	pr_info("%s%s: Proccess %d semctl with %d semafore on semid %d\n", PREFIX, SEMPREFIX, current->pid, semnum, semid);
+	if (res == 0)
+		update_sem_info(semid, semnum, cmd, arg);
 
     return res;
 }
 #endif
 
 // SYS_PIPE
-
 static void get_pipe_info(int __user *fildes)
 {
 	spin_lock(&pipe_lock);
@@ -660,13 +750,14 @@ static asmlinkage int real_sys_shmctl(int shmid, int cmd, struct shmid_ds __user
 }
 
 static struct ftrace_hook hooks[] = {
-    HOOK("sys_kill",  hook_sys_kill,  &real_sys_kill),
-	HOOK("sys_signal",  hook_sys_signal,  &real_sys_signal),
+    // HOOK("sys_kill",  hook_sys_kill,  &real_sys_kill),
+	// HOOK("sys_signal",  hook_sys_signal,  &real_sys_signal),
 	HOOK("sys_semget",  hook_sys_semget,  &real_sys_semget),
-	HOOK("sys_semop",  hook_sys_semop,  &real_sys_semop),
+  	HOOK("sys_semop",  hook_sys_semop,  &real_sys_semop),
+	// HOOK("sys_semtimedop",  hook_sys_semtimedop,  &real_sys_semtimedop),
 	HOOK("sys_semctl",  hook_sys_semctl,  &real_sys_semctl),
-	HOOK("sys_pipe",  hook_sys_pipe, &real_sys_pipe),
-	HOOK("sys_pipe2",  hook_sys_pipe2, &real_sys_pipe2),
+	// HOOK("sys_pipe",  hook_sys_pipe, &real_sys_pipe),
+	// HOOK("sys_pipe2",  hook_sys_pipe2, &real_sys_pipe2),
 	// HOOK("sys_close",  hook_sys_close, &real_sys_close),
 	HOOK("sys_shmget",  hook_sys_shmget, &real_sys_shmget),
 	HOOK("sys_shmat",  hook_sys_shmat, &real_sys_shmat),

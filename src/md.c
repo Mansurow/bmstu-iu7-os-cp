@@ -574,28 +574,56 @@ static ssize_t pipe_read(struct file *file, char __user *buf, size_t len, loff_t
 
     strlen += sprintf(pipes_info + strlen, "%7s %18s %7s %s\n", "PID", "addr", "COUNT", "SPIDS");
     
-    pnode *head = pipe_info_list.head;
+    // pnode *head = pipe_info_list.head;
 
-    char temp[TEMP_STRING_SIZE] = { 0 };
+    // char temp[TEMP_STRING_SIZE] = { 0 };
 
+    // for (; head; head = head->next)
+    // {
+    //     int count = 0;
+    //     ssize_t clen = 0;
+
+    //     childnode_t *chead = head->children; 
+
+    //     for (; chead; chead = chead->next)
+    //     {
+    //         clen += sprintf(temp + clen, "%d,", chead->pid);
+    //         count++;
+    //     }
+
+    //     strlen += sprintf(pipes_info + strlen, "%7d 0x%p %7d %s\n",
+    //         head->ppid, head->fd, count, temp);
+
+    //     memset(temp, 0, TEMP_STRING_SIZE);     
+    // }
+
+    semnode *head = sem_info_list->head;
     for (; head; head = head->next)
     {
-        int count = 0;
-        ssize_t clen = 0;
-
-        childnode_t *chead = head->children; 
-
-        for (; chead; chead = chead->next)
-        {
-            clen += sprintf(temp + clen, "%d,", chead->pid);
-            count++;
-        }
-
-        strlen += sprintf(pipes_info + strlen, "%7d 0x%p %7d %s\n",
-            head->ppid, head->fd, count, temp);
-
-        memset(temp, 0, TEMP_STRING_SIZE);     
+        strlen += sprintf(pipes_info + strlen, "%7d %7d %7d %7d %7d %7d\n",
+            head->info.pid, head->info.semid, head->info.semnum, head->info.semflg, head->info.lastcmd, head->info.value);    
     }
+
+
+
+    // struct task_struct *task = &init_task;
+
+    // do 
+    // {
+    //     struct sysv_sem *sems = &(task->sysvsem);
+    //     struct sem_undo_list *undo_list = sems->undo_list;
+    //     struct list_head *undos = &(undo_list->list_proc);
+
+    //     struct sem_undo *pos, *q;
+
+    //     list_for_each_entry_safe(pos, q, &undos, list_proc)
+    //     {
+
+    //         // pr_info("%s%s: pid = %d, semid = %d\n", PREFIX, SEMPREFIX, task->pid, undo->semid);
+    //     }
+    // }
+    // while ((task = next_task(task)) != &init_task);
+
 
     if (copy_to_user(buf, pipes_info, strlen))
     {
@@ -654,6 +682,12 @@ static struct proc_ops pipe_ops = {
     .proc_release = pipe_release,
 };
 
+// static struct proc_ops sem_ops = {
+//     .proc_open = sem_open,
+//     .proc_read = sem_read,
+//     .proc_write = sem_write,
+//     .proc_release = sem_release,
+// };
 
 static void free_proc(void)
 {
@@ -755,6 +789,13 @@ static int __init md_init(void)
 {
     int err;
 
+    sem_info_list = (semlist *) kmalloc(sizeof(semlist), GFP_KERNEL);
+    if (sem_info_list == NULL)
+    {
+        return -1;
+    }
+
+
     err = init_proc();
     if (err)
     {
@@ -780,6 +821,9 @@ static void __exit md_exit(void)
     remove_hooks();
     free_proc();
     free_plist(&pipe_info_list);
+    free_semlist(sem_info_list);
+
+    kfree(sem_info_list);
 
     pr_info("%s: module unloaded!\n", PREFIX);
 }
