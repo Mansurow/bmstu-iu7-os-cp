@@ -1,0 +1,696 @@
+\chapter{Технологическая часть}
+
+\section{Выбор языка и среды программирования}
+
+Для реализации ПО был выбран язык программирования C~\cite{c}, поскольку в нём есть все инструменты для реализации загружаемого модуля ядра. Средой программирования послужил графический редактор Visual Studio Code~\cite{vscode}, так как в нём много плагинов, улучшающих процесс разработки.
+
+
+\section{Реализация загружаемого модуля}
+
+В листингах \ref{lst:md_init_1}--\ref{lst:md_init_2} представлена функция загрузки модуля, а в листинге \ref{lst:md_exit} функция выгрузки модуля.
+
+\begin{lstlisting}[label=lst:md_init_1,caption=Функция загрузки модуля]
+static int __init md_init(void)
+{
+	int err;
+	
+	err = alloc_lists();
+	if (err)
+	{
+		return err;
+	}
+	
+	err = init_proc();
+	if (err)
+	{
+		free_proc();
+		free_lists();
+		return err;
+		}
+\end{lstlisting}
+\begin{lstlisting}[label=lst:md_init_2,caption=Функция загрузки модуля]
+	err = install_hooks();
+	if(err)
+	{
+		printk(KERN_ERR "%s install_hooks error\n", PREFIX);
+		free_proc();
+		free_lists();
+		
+		return err;
+	}
+	
+	pr_info("%s: module loaded!\n", PREFIX);
+	
+	return 0;
+}
+
+\end{lstlisting}
+
+
+\begin{lstlisting}[label=lst:md_exit,caption=Функция выгрузки модуля]
+static void __exit md_exit(void)
+{
+	remove_hooks();
+	free_proc();
+	free_lists();
+	
+	pr_info("%s: module unloaded!\n", PREFIX);
+}
+\end{lstlisting}
+
+\clearpage
+
+В листинге~\ref{lst:ftrace:lookup_name} представлена функция \texttt{lookup\_name()}, которая возвращающей адрес функции перехватываемой функции по её названию.
+
+\begin{lstlisting}[label=lst:ftrace:lookup_name,caption=Реализация функции lookup\_name()]
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
+static unsigned long lookup_name(const char *name)
+{
+	struct kprobe kp = {
+		.symbol_name = name
+	};
+	unsigned long retval;
+	
+	if (register_kprobe(&kp) < 0) return 0;
+	retval = (unsigned long) kp.addr;
+	unregister_kprobe(&kp);
+	return retval;
+}
+#else
+static unsigned long lookup_name(const char *name)
+{
+	return kallsyms_lookup_name(name);
+}
+#endif
+\end{lstlisting}
+
+В листингах~\ref{lst:ftrace:install_hook-1} и \ref{lst:ftrace:install_hook-2}  представлена реализация функции, которая инициализирует структуру \texttt{ftrace\_ops}.
+
+\begin{lstlisting}[label=lst:ftrace:install_hook-1,caption=Реализация функции install\_hook()]
+int fh_install_hook(struct ftrace_hook *hook)
+{
+	int err;
+	
+	err = fh_resolve_hook_address(hook);
+	if (err)
+		return err;
+\end{lstlisting}	
+\begin{lstlisting}[label=lst:ftrace:install_hook-2,caption=Реализация функции  fn\_install\_hook()]	
+	hook->ops.func = fh_ftrace_thunk;
+	hook->ops.flags = FTRACE_OPS_FL_SAVE_REGS
+	| FTRACE_OPS_FL_RECURSION
+	| FTRACE_OPS_FL_IPMODIFY;
+	
+	err = ftrace_set_filter_ip(&hook->ops, hook->address, 0, 0);
+	if (err) {
+		pr_debug("ftrace_set_filter_ip() failed: %d\n", err);
+		return err;
+	}
+	
+	err = register_ftrace_function(&hook->ops);
+	if (err) {
+		pr_debug("register_ftrace_function() failed: %d\n", err);
+		ftrace_set_filter_ip(&hook->ops, hook->address, 1, 0);
+		return err;
+	}
+	
+	return 0;
+}
+\end{lstlisting}
+
+В листингах \ref{lst:ftrace:remove_hook-1} и \ref{lst:ftrace:remove_hook-2} представлена реализация отключения перехвата функции.
+
+\begin{lstlisting}[label=lst:ftrace:remove_hook-1,caption=Реализация функции fn\_remove\_hook()]
+void fh_remove_hook(struct ftrace_hook *hook)
+{
+	int err;
+	
+	err = unregister_ftrace_function(&hook->ops);
+	if (err) {
+		pr_debug("unregister_ftrace_function() failed: %d\n", err);
+	}
+\end{lstlisting}
+\begin{lstlisting}[label=lst:ftrace:remove_hook-2,caption=Реализация функции fn\_remove\_hook()]	
+	err = ftrace_set_filter_ip(&hook->ops, hook->address, 1, 0);
+	if (err) {
+		pr_debug("ftrace_set_filter_ip() failed: %d\n", err);
+	}
+}
+\end{lstlisting}
+
+В листинге представлена реализация добавления перехватываемых функций в \texttt{hooks}.
+\begin{lstlisting}[label=lst:ftrace:hooks,caption=Реализация добавления перехватываемых функций в \texttt{hooks}]	
+static struct ftrace_hook hooks[] = {
+	HOOK("sys_kill",  hook_sys_kill,  &real_sys_kill),
+	HOOK("sys_signal",  hook_sys_signal,  &real_sys_signal),
+	HOOK("sys_semget",  hook_sys_semget,  &real_sys_semget),
+	HOOK("sys_semop",  hook_sys_semop,  &real_sys_semop),
+	HOOK("sys_semctl",  hook_sys_semctl,  &real_sys_semctl),
+	HOOK("sys_pipe",  hook_sys_pipe, &real_sys_pipe),
+	HOOK("sys_pipe2",  hook_sys_pipe2, &real_sys_pipe2),
+	HOOK("sys_close",  hook_sys_close, &real_sys_close),
+	HOOK("sys_shmget",  hook_sys_shmget, &real_sys_shmget),
+	HOOK("sys_shmat",  hook_sys_shmat, &real_sys_shmat),
+	HOOK("sys_shmdt",  hook_sys_shmdt, &real_sys_shmdt),
+	HOOK("sys_old_shmctl",  hook_sys_shmctl, &real_sys_shmctl),
+	HOOK("sys_shmctl",  hook_sys_shmctl, &real_sys_shmctl),
+};
+\end{lstlisting}
+
+В листингах~\ref{lst:sys_kill}--\ref{lst:sys_semctl-2} представлена реализация функций оберток \newline \texttt{sys\_kill}, \texttt{sys\_signal}, \texttt{sys\_semget}, \texttt{sys\_semop} и \texttt{sys\_semctl}.
+
+\clearpage
+
+\begin{lstlisting}[label=lst:sys_kill,caption=Реализация функции обертки \texttt{sys\_kill()}]	
+static asmlinkage long (*real_sys_kill)(const struct pt_regs *);
+static asmlinkage int hook_sys_kill(const struct pt_regs *regs)
+{
+	int res = real_sys_kill(regs);
+	
+	if (res == 0)
+	{
+		pid_t pid = regs->di;
+		int sig = regs->si;
+		
+		char currentString[TEMP_STRING_SIZE];
+		
+		memset(currentString, 0, TEMP_STRING_SIZE);	
+		snprintf(currentString, TEMP_STRING_SIZE, "Proccess %d sent signal %s to process %d\n", current->pid, signal_names[sig], pid);
+		
+		spin_lock(&signal_logs_lock);
+		
+		strcat(signal_logs, currentString); 
+		
+		spin_unlock(&signal_logs_lock);
+	}
+	
+	return res;
+}
+\end{lstlisting}
+
+\clearpage
+
+\begin{lstlisting}[label=lst:sys_semget,caption=Реализация функции обертки \texttt{sys\_semget()}]	
+static void get_sem_info(int semid, int nsems, int semflg)
+{
+	spin_lock(&sem_lock);
+	for (int semnum = 0; semnum < nsems; semnum++) {
+		sem_info_t info = {
+			.semid = semid,
+			.semnum = semnum + 1,
+			.pid = current->pid,
+			.semflg = semflg,
+			.lastcmd = -1,
+			.value = -1
+		};
+		
+		push_bask_semlist(sem_info_list, info);
+	}
+	spin_unlock(&sem_lock);
+}
+
+static asmlinkage long (*real_sys_semget)(const struct pt_regs *);
+static asmlinkage int hook_sys_semget(const struct pt_regs *regs)
+{
+	int semid = real_sys_semget(regs);
+	
+	key_t key = regs->di;
+	int nsems = regs->si;
+	int semflg = regs->dx;
+	
+	if (semid == -1) {
+		pr_err("%s%s: Proccess %d can't create or get %d semafores\n", PREFIX, SEMPREFIX, current->pid, nsems);
+	}
+	else {
+\end{lstlisting}		
+\begin{lstlisting}[label=lst:sys_semget-2,caption=Реализация функции обертки \texttt{sys\_semget()}]
+		get_sem_info(semid, nsems, semflg);
+		pr_info("%s%s: Proccess %d create or get %d semafores with semid %d\n", PREFIX, SEMPREFIX, current->pid, nsems, semid);
+	}
+	
+	return semid;
+}
+\end{lstlisting}
+
+
+\begin{lstlisting}[label=lst:sys_semop,caption=Реализация функции обертки \texttt{sys\_semop()}]	
+static void update_semop_info(int semid, struct sembuf __user *sops)
+{
+	spin_lock(&sem_lock);
+	
+	semnode *head = sem_info_list->head;
+	
+	for(;head; head = head->next) {
+		if (head->info.semid == semid && head->info.semnum == sops->sem_num) {
+			head->info.value += sops->sem_op;
+		} 
+	}
+	
+	spin_unlock(&sem_lock);
+}
+
+static asmlinkage long (*real_sys_semop)(const struct pt_regs *);
+static asmlinkage int hook_sys_semop(const struct pt_regs *regs)
+{
+	int res = real_sys_semop(regs);
+	
+	int semid = regs->di;
+\end{lstlisting}	
+\begin{lstlisting}[label=lst:sys_semop-2,caption=Реализация функции обертки \texttt{sys\_semop()}]	
+	struct sembuf __user *sops = regs->si;
+	unsigned nsops = regs->dx;
+		
+	if (res == -1) {
+		pr_err("%s%s: Proccess %d can't operate with %d semafore on semid %d\n", PREFIX, SEMPREFIX, current->pid, sops->sem_num, semid);
+	}
+	else {
+		update_semop_info(semid, sops);
+		pr_info("%s%s: Proccess %d operate with %d semafore on semid %d\n", PREFIX, SEMPREFIX, current->pid, sops->sem_num, semid);
+	}
+	
+	return res;
+}
+\end{lstlisting}
+
+
+\begin{lstlisting}[label=lst:sys_semctl,caption=Реализация функции обертки \texttt{sys\_semctl()}]	
+static void update_semctl_info(int semid, int semnum, int cmd, unsigned long arg)
+{
+	spin_lock(&sem_lock);	
+	semnode *head = sem_info_list->head;
+	ushort *values = NULL;
+	
+	if (cmd == SETALL || cmd == GETALL)
+		values = (ushort *) arg;
+
+	for(;head; head = head->next) {
+		if (head->info.semid == semid) {
+			if (cmd == SETVAL && head->info.semnum == semnum + 1)
+				head->info.value = arg;
+\end{lstlisting}				
+\begin{lstlisting}[label=lst:sys_semctl-2,caption=Реализация функции обертки \texttt{sys\_semctl()}]				
+			else if (cmd == SETALL || cmd == GETALL)
+				head->info.value = values[head->info.semnum - 1];	
+			head->info.lastcmd = cmd;
+		} 
+	}
+	spin_unlock(&sem_lock);
+	
+	pr_info("%s%s: Proccess %d semctl with %d semafore on semid %d, value: %d\n", PREFIX, SEMPREFIX, current->pid, semnum, semid, arg);
+}
+
+static asmlinkage long (*real_sys_semctl)(const struct pt_regs *);
+static asmlinkage int hook_sys_semctl(const struct pt_regs *regs)
+{
+	int res = real_sys_semctl(regs);
+	
+	int semid = regs->di;
+	int semnum = regs->si;
+	int cmd = regs->dx;
+	unsigned long arg = regs->r10;
+	
+	if (res == 0)
+		update_semctl_info(semid, semnum, cmd, arg);
+	
+	return res;
+}
+\end{lstlisting}
+
+\clearpage
+
+В листингах~\ref{lst:read_general}--\ref{lst:read_general-2} представлена реализация чтения из файла general.
+
+\begin{lstlisting}[label=lst:read_general, caption=Реализация функции чтения из файла general]			
+static ssize_t general_read(struct file *file, char __user *buf, size_t len, loff_t *fPos)
+{
+	pr_info("%s%s: general_read called\n", PREFIX, FORTUNEPREFIX);
+	if (*fPos > 0)
+		return 0;
+	
+	ssize_t strlen += sprintf(general_info + strlen, "%7s %7s %7s %7s %10s %7s %7s %7s %7s %7s %14s %14s %14s %7s\n", 
+	"PPID", "PID", "STATE", "ESTATE", "FLAGS", "POLICY", "PRIO", "SPRIO", "NPRIO", "PRPRIO", "UTIME", "STIME", "DELAY", "COMM");
+	
+	struct task_struct *task = &init_task;
+	do {
+		strlen += sprintf(general_info + strlen, "%7d %7d %7d %7d %10x %7d %7d %7d %7d %7d %14llu %14llu %14llu\t%s\n",
+		task->parent->pid, task->pid, task->__state, task->exit_state, task->flags,
+		task->policy, task->prio, task->static_prio, task->normal_prio, task->rt_priority,
+		task->utime, task->stime, task->sched_info.run_delay,
+		task->comm);  
+	}
+	while ((task = next_task(task)) != &init_task);
+	
+	if (copy_to_user(buf, general_info, strlen)) {
+		printk(KERN_ERR "%s%s: copy_to_user error\n", PREFIX, FORTUNEPREFIX);	
+		return -EFAULT;
+	}
+\end{lstlisting}	
+\begin{lstlisting}[label=lst:read_general-2, caption=Реализация функции чтения из файла general]			
+	*fPos += strlen;
+	memset(general_info, 0, LOG_SIZE);
+	
+	return strlen;
+}
+\end{lstlisting}
+
+В листингах~\ref{lst:read_sighands}--\ref{lst:read_sighands-2} представлена реализация чтения из файла sighands.
+
+\begin{lstlisting}[label=lst:read_sighands, caption=Реализация функции чтения из файла sighands]			
+static ssize_t sighand_read(struct file *file, char __user *buf, size_t len, loff_t *fPos)
+{
+	pr_info("%s%s: signal_read called\n", PREFIX, FORTUNEPREFIX);
+	
+	if (*fPos > 0)
+		return 0;
+	
+	ssize_t strlen = 0;
+	strlen += sprintf(sighand_info + strlen, "%7s\t%14s\t%8s\t%7s\t%7s\n", "PID", "SIGNAL", "FLAGS", "HANDLER");
+	
+	struct task_struct *task = &init_task;
+	do {
+		for (int signo = 1; signo < _NSIG; ++signo) {
+			struct k_sigaction *ka = &task->sighand->action[signo - 1];
+			
+			if (ka->sa.sa_handler > 1) {
+				strlen += sprintf(sighand_info + strlen, "%7d %14s %7lu 0x%x\n", task->pid, signal_names[signo], ka->sa.sa_flags, ka->sa.sa_handler);
+\end{lstlisting}
+\begin{lstlisting}[label=lst:read_sighand-2, caption=Реализация функции чтения из файла sighands]				
+			}
+		}
+	}
+	while ((task = next_task(task)) != &init_task);
+	
+	if (copy_to_user(buf, sighand_info, strlen)) {
+		printk(KERN_ERR "%s: copy_to_user error\n", PREFIX);
+		return -EFAULT;
+	}
+	
+	*fPos += strlen;
+	
+	memset(sighand_info, 0, LOG_SIZE);
+	
+	return strlen;
+}
+\end{lstlisting}
+
+В листингах~\ref{lst:read_memory}--\ref{lst:read_memory-2} представлена реализация чтения из файла memory.
+
+\begin{lstlisting}[label=lst:read_memory, caption=Реализация функции чтения из файла memory]			
+static ssize_t memory_read(struct file *file, char __user *buf, size_t len, loff_t *fPos)
+{
+	pr_info("%s%s: memory_read called\n", PREFIX, FORTUNEPREFIX);
+	
+	if (*fPos > 0)
+		return 0;
+	
+	ssize_t strlen = 0;
+	strlen += sprintf(memory_info + strlen, "%7s %7s %10s %10s %10s %10s %10s %7s %10s %10s %10s %10s %10s\n", 
+	"PID", "MMUSERS", "TOTAL VM", "LOCKED VM", "DATA VM", "EXEC VM", "STACK VM", "MAPS", "HEAP", "CODE", "DATA", "ARGS", "ENV");
+\end{lstlisting}	
+\begin{lstlisting}[label=lst:read_memory-2, caption=Реализация функции чтения из файла memory]	
+	struct task_struct *task = &init_task;
+	do {
+		struct mm_struct *mm = task->mm;
+		
+		if (mm != NULL) {
+			unsigned long brk = mm->brk - mm->start_brk; 
+			unsigned long code = mm->end_code - mm->start_code;   
+			unsigned long data = mm->end_data - mm->start_data;
+			unsigned long args = mm->arg_end - mm->arg_start;
+			unsigned long env = mm->env_end - mm->env_start;
+			
+			strlen += sprintf(memory_info + strlen, "%7d %7d %10lu %10lu %10lu %10lu %10lu %7d %10lu %10lu %10lu %10lu %10lu\n", 
+			task->pid, mm->mm_users.counter, mm->total_vm, mm->locked_vm, mm->data_vm, mm->exec_vm, mm->stack_vm, mm->map_count, brk, code, data, args, env);
+		}
+	}
+	while ((task = next_task(task)) != &init_task);
+	
+	if (copy_to_user(buf, memory_info, strlen)){
+		printk(KERN_ERR "%s: copy_to_user error\n", PREFIX);
+		return -EFAULT;
+	}
+	
+	*fPos += strlen;
+	memset(memory_info, 0, LOG_SIZE);
+	
+	return strlen;
+}
+\end{lstlisting}
+
+В листинге~\ref{lst:write_maps} представлена реализация записи в файл maps.
+
+\begin{lstlisting}[label=lst:write_maps, caption=Реализация функции записи в файл maps]			
+static ssize_t maps_write(struct file *file, const char __user *ubuf, size_t len, loff_t *fPos)
+{
+	pr_info("%s%s: maps_write called\n", PREFIX, FORTUNEPREFIX);
+	
+	char kbuf[10];
+	if (copy_from_user(kbuf, ubuf, len)){
+		printk(KERN_ERR "%s%s: copy_from_user error\n", PREFIX, FORTUNEPREFIX);
+		return -EFAULT;
+	}
+	kbuf[len - 1] = 0;
+	
+	if(sscanf(kbuf, "%d", &mt_pid) != 1)
+	{
+		printk(KERN_ERR "%s: sscanf error\n", PREFIX);
+		return -EFAULT;
+	}
+	
+	return len;
+}
+\end{lstlisting}
+
+В листингах~\ref{lst:read_maps}--\ref{lst:read_maps-3} представлена реализация чтения из файла maps.
+
+\begin{lstlisting}[label=lst:read_maps, caption=Реализация функции чтения из файла maps]			
+static ssize_t maps_read(struct file *file, char __user *buf, size_t len, loff_t *fPos)
+{
+	pr_info("%s%s: maps_read called\n", PREFIX, FORTUNEPREFIX);
+	
+	if (*fPos > 0)
+		return 0;
+	
+	ssize_t strlen = 0;
+\end{lstlisting}	
+\begin{lstlisting}[label=lst:read_maps-2, caption=Реализация функции чтения из файла maps]		
+	struct task_struct *task = find_task_struct(mt_pid);
+	
+	if (task == NULL || mt_pid == -1)
+	{
+		strlen += sprintf(maps_info + strlen, "Process with pid %d doesn't exist\n", mt_pid);
+	}
+	else
+	{
+		strlen += sprintf(maps_info + strlen, "%7s %15s %10s %10s %10s\n", "PID", "addr-addr", "Flags", "BYTES", "PAGES");
+		
+		struct mm_struct *mm = task->mm;
+		
+		if (mm == NULL)
+			strlen += sprintf(maps_info + strlen, "%7d %20s %10s %10s %10s\n", task->pid, "?-?", "?", "?", "?");
+		else{
+			struct vm_area_struct *vma = mm->mmap;
+			
+			if (vma == NULL)
+				strlen += sprintf(maps_info + strlen, "%7d %15s %10s %10s %10s\n", task->pid, "?-?", "?", "?", "?");
+			else {
+				for (; vma != NULL; vma = vma->vm_next){
+					unsigned long bytes = vma->vm_end - vma->vm_start;
+					int pages = bytes / 4096;
+					
+					strlen += sprintf(maps_info + strlen, "%7d %x-%x %10lld %10lu %7d\n", 
+\end{lstlisting}	
+\begin{lstlisting}[label=lst:read_maps-3, caption=Реализация функции чтения из файла maps]					
+					task->pid, vma->vm_start, vma->vm_end, vma->vm_flags, bytes, pages);
+				}
+			}
+		}
+	}
+	
+	if (copy_to_user(buf, maps_info, strlen)) {
+		printk(KERN_ERR "%s%s: copy_to_user error\n", PREFIX, FORTUNEPREFIX);
+		return -EFAULT;
+	}
+	
+	memset(maps_info, 0, LOG_SIZE);
+	
+	*fPos += strlen;
+	
+	return strlen;
+}
+\end{lstlisting}
+
+В листингах~\ref{lst:read_pipe}--\ref{lst:read_pipe-2} представлена реализация чтения из файла pipe.
+
+\begin{lstlisting}[label=lst:read_pipe, caption=Реализация функции чтения из файла pipe]			
+static ssize_t pipe_read(struct file *file, char __user *buf, size_t len, loff_t *fPos)
+{
+	pr_info("%s%s: pipe_read called\n", PREFIX, FORTUNEPREFIX);
+	
+	if (*fPos > 0)
+		return 0;
+	
+	ssize_t strlen = 0;
+	strlen += sprintf(pipes_info + strlen, "%7s %18s %7s %s\n", "PID", "FD", "COUNT", "PIDS");
+\end{lstlisting}	
+\begin{lstlisting}[label=lst:read_pipe-2, caption=Реализация функции чтения из файла pipe]		
+	pnode *head = pipe_info_list.head;
+	
+	for (; head; head = head->next) {
+		int count = 0;
+		ssize_t clen = 0;
+		char temp[TEMP_STRING_SIZE] = { 0 };
+		
+		list_head *pos;
+		task_struct *task, *child;
+		task = pid_task(find_vpid(head->pid), PIDTYPE_PID);
+		
+		list_for_each(pos; task->children; list) {
+			child = list_entry(pos; struct task_struct, sibling);
+			clen += sprintf(temp + clen, "%d,", child->pid);
+			count++;
+		}
+		
+		strlen += sprintf(pipes_info + strlen, "%7d %18llu %7d %s\n",
+		head->ppid, head->fd, count, temp);   
+	}
+	
+	if (copy_to_user(buf, pipes_info, strlen)) {
+		printk(KERN_ERR "%s%s: copy_to_user error\n", PREFIX, FORTUNEPREFIX);
+		return -EFAULT;
+	}
+		
+	*fPos += strlen;
+	memset(pipes_info, 0, LOG_SIZE);
+	
+	return strlen;
+}
+\end{lstlisting}
+
+В листинге~\ref{lst:read_sem} представлена реализация чтения из файла sem.
+
+\begin{lstlisting}[label=lst:read_sem, caption=Реализация функции чтения из файла sem]			
+static ssize_t sem_read(struct file *file, char __user *buf, size_t len, loff_t *fPos)
+{
+	pr_info("%s%s: sem_read called\n", PREFIX, FORTUNEPREFIX);
+	
+	if (*fPos > 0)
+		return 0;
+	
+	ssize_t strlen = 0;
+	strlen += sprintf(sem_info + strlen, "%7s %7s %7s %7s %7s %7s\n", "PID", "SEMID", "SEMNUM", "FLAGS", "CMD", "VALUE");
+	semnode *head = sem_info_list->head;
+	for (; head; head = head->next) {
+		char command[10] = { 0 };    
+		cmd_to_str(command, head->info.lastcmd);
+		
+		strlen += sprintf(sem_info + strlen, "%7d %7d %7d %7d %7s %7d\n",
+		head->info.pid, head->info.semid, head->info.semnum, head->info.semflg, command, head->info.value);    
+	}
+	
+	if (copy_to_user(buf, sem_info, strlen)) {
+		printk(KERN_ERR "%s%s: copy_to_user error\n", PREFIX, FORTUNEPREFIX);
+		return -EFAULT;
+	}
+		
+	*fPos += strlen;
+	memset(sem_info, 0, LOG_SIZE);
+	return strlen;
+}
+\end{lstlisting}
+
+В листингах~\ref{lst:read_shm}--\ref{lst:read_shm-2} представлена реализация чтения из файла pipe.
+
+\begin{lstlisting}[label=lst:read_shm, caption=Реализация функции чтения из файла shm]			
+static ssize_t shm_read(struct file *file, char __user *buf, size_t len, loff_t *fPos)
+{
+	pr_info("%s%s: shm_read called\n", PREFIX, FORTUNEPREFIX);
+	
+	if (*fPos > 0)
+		return 0;
+	
+	ssize_t strlen = 0;
+	strlen += sprintf(shm_info + strlen, "%7s %7s %10s %14s %7s\n", "PID", "SHMID", "CMD", "SIZE", "ADDR");
+	shmnode *head = shm_info_list->head;
+	for (; head; head = head->next)	{
+		char command[10] = { 0 };    
+		cmd_to_str(command, head->info.lastcmd);
+		
+		if (head->info.addr == NULL) {
+			strlen += sprintf(shm_info + strlen, "%7d %7d %10s %14llu %s\n",
+			head->info.pid, head->info.shmid, command, head->info.size, "?"); 
+		}
+		else { 
+			strlen += sprintf(shm_info + strlen, "%7d %7d %10s %14llu 0x%p\n",
+			head->info.pid, head->info.shmid, command, head->info.size, head->info.addr);
+		}
+	}
+	if (copy_to_user(buf, shm_info, strlen)) {
+		printk(KERN_ERR "%s%s: copy_to_user error\n", PREFIX, FORTUNEPREFIX);
+\end{lstlisting}
+\begin{lstlisting}[label=lst:read_shm-2, caption=Реализация функции чтения из файла shm]			
+		return -EFAULT;
+	}
+	
+	*fPos += strlen;
+	memset(shm_info, 0, LOG_SIZE);
+	return strlen;
+}
+\end{lstlisting}
+
+Для файлов были созданы экземпляры структуры \texttt{proc\_ops}, они представлены в листингах~\ref{lst:proc_ops}--\ref{lst:proc_ops-2}.
+
+\begin{lstlisting}[label=lst:proc_ops, caption=Экземпляры структуры proc\_ops]			
+static struct proc_ops signal_logs_ops = {
+	.proc_open = signal_logs_open,
+	.proc_read = signal_logs_read,
+	.proc_write = signal_logs_write,
+	.proc_release = signal_logs_release,
+};
+static struct proc_ops sighand_ops = {
+	.proc_open = sighand_open,
+	.proc_read = sighand_read,
+	.proc_write = sighand_write,
+	.proc_release = sighand_release,
+};
+static struct proc_ops memory_ops = {
+	.proc_open = memory_open,
+	.proc_read = memory_read,
+	.proc_write = memory_write,
+	.proc_release = memory_release,
+};
+static struct proc_ops maps_ops = {
+	.proc_open = maps_open,
+	.proc_read = maps_read,
+	.proc_write = maps_write,
+\end{lstlisting}	
+\begin{lstlisting}[label=lst:proc_ops-2, caption=Экземпляры структуры proc\_ops]	
+	.proc_release = maps_release,
+};
+static struct proc_ops general_ops = {
+	.proc_open = general_open,
+	.proc_read = general_read,
+	.proc_write = general_write,
+	.proc_release = general_release,
+};
+static struct proc_ops pipe_ops = {
+	.proc_open = pipe_open,
+	.proc_read = pipe_read,
+	.proc_write = pipe_write,
+	.proc_release = pipe_release,
+};
+static struct proc_ops sem_ops = {
+	.proc_open = sem_open,
+	.proc_read = sem_read,
+	.proc_write = sem_write,
+	.proc_release = sem_release,
+};
+static struct proc_ops shm_ops = {
+	.proc_open = shm_open,
+	.proc_read = shm_read,
+	.proc_write = shm_write,
+	.proc_release = shm_release,
+};
+\end{lstlisting}
+
+Весь код программы представлен в Приложении А.
