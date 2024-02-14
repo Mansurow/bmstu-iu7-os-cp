@@ -12,7 +12,6 @@ void signal_handler(int signo) {
 }
 
 int main() {
-    // Регистрация обработчика сигнала
     signal(SIGUSR1, signal_handler);
 
     pid_t child_pid = fork();
@@ -21,27 +20,19 @@ int main() {
         perror("fork");
         exit(EXIT_FAILURE);
     } else if (child_pid == 0) {
-        // Код для дочернего процесса
         printf("PID: %d , PPID: %d \n", getpid(), getppid());
-        // Ожидание сигнала от родительского процесса
         printf("Child: Waiting for signal from parent...\n");
-        pause(); // Приостанавливаем выполнение, ожидая получение сигнала
+        pause();
         printf("Child: Signal received. Exiting.\n");
 
     } else {
-        // Код для родительского процесса
-
-        // Отправка сигнала дочернему процессу
         printf("Parent: Sending SIGUSR1 signal to child...\n");
-        sleep(1); // Даем дочернему процессу время для ожидания
+        sleep(1);
         kill(child_pid, SIGUSR1);
-
-        // Ждем завершения дочернего процесса
+        
         waitpid(child_pid, NULL, 0);
         printf("Parent: Child process has exited. Exiting.\n");
     }
     
-    
-
     return 0;
 }

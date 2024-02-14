@@ -159,30 +159,6 @@ struct task_struct *find_task_struct(pid_t pid)
 	return NULL;
 }
 
-static ssize_t show_sighand_info(void) {
-
-    int strlen = 0;
-
-    strlen += sprintf(sighand_info + strlen, "%7s\t%14s\t%8s\t%7s\t%7s\n", "PID", "SIGNAL", "FLAGS", "HANDLER");
-
-    struct task_struct *task = &init_task;
-
-    do 
-    {
-        for (int signo = 1; signo < _NSIG; ++signo) {
-            struct k_sigaction *ka = &task->sighand->action[signo - 1];
-
-            if (ka->sa.sa_handler > 1)
-            {
-                strlen += sprintf(sighand_info + strlen, "%7d %14s %7lu 0x%x\n", task->pid, signal_names[signo], ka->sa.sa_flags, ka->sa.sa_handler);
-            }
-        }
-    }
-    while ((task = next_task(task)) != &init_task);
-
-    return strlen;
-}
-
 static void cmd_to_str(char *cmdname, int cmd)
 {
     if (cmd == IPC_STAT)
@@ -326,20 +302,38 @@ static ssize_t sighand_read(struct file *file, char __user *buf, size_t len, lof
     if (*fPos > 0)
         return 0;
 
-    ssize_t logLen = show_sighand_info();
+    ssize_t strlen = 0;
 
-    if (copy_to_user(buf, sighand_info, logLen))
+    strlen += sprintf(sighand_info + strlen, "%7s\t%14s\t%8s\t%7s\t%7s\n", "PID", "SIGNAL", "FLAGS", "HANDLER");
+
+    struct task_struct *task = &init_task;
+
+    do 
+    {
+        for (int signo = 1; signo < _NSIG; ++signo) {
+            struct k_sigaction *ka = &task->sighand->action[signo - 1];
+
+            if (ka->sa.sa_handler > 1)
+            {
+                strlen += sprintf(sighand_info + strlen, "%7d %14s %7lu 0x%x\n", task->pid, signal_names[signo], ka->sa.sa_flags, ka->sa.sa_handler);
+            }
+        }
+    }
+    while ((task = next_task(task)) != &init_task);
+
+
+    if (copy_to_user(buf, sighand_info, strlen))
     {
         printk(KERN_ERR "%s: copy_to_user error\n", PREFIX);
 
         return -EFAULT;
     }
 
-    *fPos += logLen;
+    *fPos += strlen;
 
     memset(sighand_info, 0, LOG_SIZE);
 
-    return logLen;
+    return strlen;
 }
 
 
@@ -506,34 +500,34 @@ static ssize_t maps_read(struct file *file, char __user *buf, size_t len, loff_t
     }
     else
     {
-        strlen += sprintf(maps_info + strlen, "%7s %15s %10s %10s %10s\n", "PID", "addr-addr", "Flags", "BYTES", "PAGES");
+        strlen += sprintf(maps_info + strlen, "%7s %21s %14s %14s %10s\n", "PID", "addr-addr", "Flags", "BYTES", "PAGES");
 
         struct mm_struct *mm = task->mm;
 
         if (mm == NULL)
         {
-            strlen += sprintf(maps_info + strlen, "%7d %20s %10s %10s %10s\n", task->pid, "?-?", "?", "?", "?");
+            strlen += sprintf(maps_info + strlen, "%7d %20s %14s %14s %10s\n", task->pid, "?-?", "?", "?", "?");
         }
         else
         {
             // 5.19.0 и меньше версия ядра, в 6+ убрали по причине оптимизации
-            // struct vm_area_struct *vma = mm->mmap;
+            struct vm_area_struct *vma = mm->mmap;
 
-            // if (vma == NULL)
-            // {
-            //     strlen += sprintf(maps_info + strlen, "%7d %15s %10s %10s %10s\n", task->pid, "?-?", "?", "?", "?");
-            // }
-            // else 
-            // {
-            //     for (; vma != NULL; vma = vma->vm_next)
-            //     {
-            //         unsigned long bytes = vma->vm_end - vma->vm_start;
-            //         int pages = bytes / 4096;
+            if (vma == NULL)
+            {
+                strlen += sprintf(maps_info + strlen, "%7d %20s %14s %14s %10s\n", task->pid, "?-?", "?", "?", "?");
+            }
+            else 
+            {
+                for (; vma != NULL; vma = vma->vm_next)
+                {
+                    unsigned long bytes = vma->vm_end - vma->vm_start;
+                    int pages = bytes / 4096;
 
-            //         strlen += sprintf(maps_info + strlen, "%7d %x-%x %10lld %10lu %7d\n", 
-            //             task->pid, vma->vm_start, vma->vm_end, vma->vm_flags, bytes, pages);
-            //     }
-            // }
+                    strlen += sprintf(maps_info + strlen, "%7d %10x-%10x %14ld %14lu %10d\n", 
+                        task->pid, vma->vm_start, vma->vm_end, vma->vm_flags, bytes, pages);
+                }
+            }
         }
     }
     
@@ -582,7 +576,7 @@ static ssize_t pipe_read(struct file *file, char __user *buf, size_t len, loff_t
 
     ssize_t strlen = 0;
 
-    strlen += sprintf(pipes_info + strlen, "%7s %18s %7s %s\n", "PID", "FD", "COUNT", "SPIDS");
+    strlen += sprintf(pipes_info + strlen, "%7s %18s %7s\n", "PID", "FD", "COUNT");
     
     pnode *head = pipe_info_list.head;
 
@@ -593,13 +587,36 @@ static ssize_t pipe_read(struct file *file, char __user *buf, size_t len, loff_t
         int count = 0;
         ssize_t clen = 0;
 
-        childnode_t *chead = head->children; 
+        // childnode_t *chead = head->children; 
 
-        for (; chead; chead = chead->next)
+        struct list_head *pos;
+        struct task_struct *task, *curtask;
+
+        curtask = find_task_struct(head->ppid);
+
+        if (curtask == NULL)
         {
-            clen += sprintf(temp + clen, "%d,", chead->pid);
+            continue;
+        }
+
+        int index = 0;
+        pid_t tmp_pid;
+        list_for_each(pos, &(curtask->children))
+        {
+        	task = list_entry(pos, struct task_struct, sibling);
+        	tmp_pid = task->pid;
+            if (count < 10)
+                clen += sprintf(temp + clen, "%d,", tmp_pid);
+            else if (count == 11)
+                clen += sprintf(temp + clen, "...");
             count++;
         }
+
+        // for (; chead; chead = chead->next)
+        // {
+        //     clen += sprintf(temp + clen, "%d,", chead->pid);
+        //     count++;
+        // }
 
         strlen += sprintf(pipes_info + strlen, "%7d %18llu %7d %s\n",
             head->ppid, head->fd, count, temp);
@@ -614,7 +631,7 @@ static ssize_t pipe_read(struct file *file, char __user *buf, size_t len, loff_t
         return -EFAULT;
     }
 
-    memset(pipes_info, 0, LOG_SIZE);
+    // memset(pipes_info, 0, LOG_SIZE);
 
     *fPos += strlen;
 

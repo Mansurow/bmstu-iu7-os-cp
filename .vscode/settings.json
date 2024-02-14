@@ -1,0 +1,19 @@
+{
+    "files.associations": {
+        "sem.h": "c",
+        "ipc.h": "c",
+        "module.h": "c",
+        "kernel.h": "c",
+        "types.h": "c",
+        "shm.h": "c",
+        "posix_types.h": "c",
+        "sembuf.h": "c",
+        "signal.h": "c",
+        "time.h": "c",
+        "version.h": "c",
+        "hooks.h": "c",
+        "stdlib.h": "c",
+        "utils.h": "c"
+    },
+    "C_Cpp.errorSquiggles": "disabled"
+}

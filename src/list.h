@@ -61,6 +61,7 @@ typedef struct shm_info_t
 {
     pid_t pid;
     int shmid;
+    // int shmflg;
     unsigned long size;
     char __user *addr;
     int lastcmd;   

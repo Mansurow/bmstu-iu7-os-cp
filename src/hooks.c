@@ -219,11 +219,11 @@ static asmlinkage int hook_sys_kill(const struct pt_regs *regs)
 {
     int res = real_sys_kill(regs);
 
-	if (res == 0)
-	{
-		pid_t pid = regs->di;
-		int sig = regs->si;
+	pid_t pid = regs->di;
+	int sig = regs->si;
 
+	if (res == 0 && sig > 0)
+	{
 		char currentString[TEMP_STRING_SIZE];
 		
 		memset(currentString, 0, TEMP_STRING_SIZE);	
@@ -489,26 +489,19 @@ static void update_semctl_info(int semid, int semnum, int cmd, unsigned long arg
 	if (cmd == SETALL || cmd == GETALL)
 		values = (ushort *) arg;
 
-	if (cmd == IPC_RMID)
+	for(;head; head = head->next)
 	{
-		pop_semlist(sem_info_list, semid);
-	}
-	else
-	{
-		for(;head; head = head->next)
+		if (head->info.semid == semid)
 		{
-			if (head->info.semid == semid)
+			if (cmd == SETVAL && head->info.semnum == semnum + 1)
+				head->info.value = arg;
+			else if (cmd == SETALL || cmd == GETALL)
 			{
-				if (cmd == SETVAL && head->info.semnum == semnum + 1)
-					head->info.value = arg;
-				else if (cmd == SETALL || cmd == GETALL)
-				{
-					head->info.value = values[head->info.semnum - 1];	
-				} 	
+				head->info.value = values[head->info.semnum - 1];	
+			} 	
 
-				head->info.lastcmd = cmd;
-			} 
-		}
+			head->info.lastcmd = cmd;
+		} 
 	}
 	spin_unlock(&sem_lock);
 
@@ -552,21 +545,7 @@ static void get_pipe_info(int __user *fildes)
 {
 	spin_lock(&pipe_lock);
 
-	childnode_t *head = NULL;
-
-	struct list_head *pos;
-	struct task_struct *task;
-
-	int index = 0;
-	pid_t tmp_pid;
-    list_for_each(pos, &(current->children))
-	{
-		task = list_entry(pos, struct task_struct, sibling);
-		tmp_pid = task->pid;
-		push_bask_childlist(&head, tmp_pid);
-	}
-
-	push_bask_plist(&pipe_info_list, current->pid, fildes, head);
+	push_bask_plist(&pipe_info_list, current->pid, fildes, NULL);
 
 	spin_unlock(&pipe_lock);
 
@@ -672,7 +651,7 @@ static asmlinkage int hook_sys_close(unsigned int fd)
 #endif
 
 // SYS_SHMGET
-static void get_shm_info(int shmid, size_t size)
+static void get_shm_info(int shmid, size_t size, int shmflg)
 {
 	spin_lock(&shm_lock);
 
@@ -681,7 +660,8 @@ static void get_shm_info(int shmid, size_t size)
 		.shmid = shmid,
 		.size = size,
 		.addr = NULL,
-		.lastcmd = -1
+		.lastcmd = -1,
+		// .shmflg = shmflg
 	};
 
 	push_bask_shmlist(shm_info_list, info);
@@ -697,6 +677,7 @@ static asmlinkage int hook_sys_shmget(const struct pt_regs *regs)
 
 	key_t key = regs->di;
 	size_t size = regs->si;
+	int flag = regs->dx;
 
 	if (shmid == -1)
 	{
@@ -704,7 +685,7 @@ static asmlinkage int hook_sys_shmget(const struct pt_regs *regs)
 	}
 	else
 	{
-		get_shm_info(shmid, size);
+		get_shm_info(shmid, size, flag);
 
 		pr_info("%s%s: Proccess %d create or get shm %d on %lu size\n", PREFIX, SHMPREFIX, current->pid, shmid, size);
 	}
@@ -723,7 +704,7 @@ static asmlinkage int hook_sys_shmget(key_t key, size_t size, int flag)
 	}
 	else
 	{
-		get_shm_info(shmid, size);
+		get_shm_info(shmid, size, flag);
 
 		pr_info("%s%s: Proccess %d create or get shm %d on %lu size\n", PREFIX, SHMPREFIX, current->pid, shmid, size);
 	}
@@ -733,7 +714,7 @@ static asmlinkage int hook_sys_shmget(key_t key, size_t size, int flag)
 #endif
 
 // SYS_SHMAT
-static void update_shmat_info(int shmid, char __user *shmaddr)
+static void update_shmat_info(int shmid, char __user *shmaddr, int shmflg)
 {
 	spin_lock(&shm_lock);
 
@@ -757,7 +738,8 @@ static void update_shmat_info(int shmid, char __user *shmaddr)
 			.shmid = shmid,
 			.size = 0,
 			.addr = shmaddr,
-			.lastcmd = -1
+			.lastcmd = -1,
+			// .shmflg = node->info.shmflg
 		};
 
 		push_bask_shmlist(shm_info_list, info);
@@ -772,7 +754,7 @@ static asmlinkage long hook_sys_shmat(const struct pt_regs *regs)
 {
 	int shmid = regs->di;
 	// char __user *shmaddr = regs->si;
-	// int shmflag = regs->dx;
+	int shmflg = regs->dx;
 
 	long addr = real_sys_shmat(regs);
 
@@ -782,7 +764,7 @@ static asmlinkage long hook_sys_shmat(const struct pt_regs *regs)
 	} 
 	else
 	{
-		update_shmat_info(shmid, addr);
+		update_shmat_info(shmid, addr, shmflg);
 		pr_info("%s%s: Proccess %d was attached to %d shm - addr - %lu\n", PREFIX, SHMPREFIX, current->pid, shmid, addr);
 	}
 
@@ -793,6 +775,8 @@ static asmlinkage long (*real_sys_shmat)(int shmid, char __user *shmaddr, int sh
 
 static asmlinkage long hook_sys_shmat(int shmid, char __user *shmaddr, int shmflg)
 {
+	long addr = real_sys_shmat(shmid, shmaddr, shmflg);	
+
     unsigned long addr = real_sys_shmat(shmid, shmaddr, shmflg);
 
 	pr_info("%s%s: Proccess %d was attached to %d shm - addr: %lu\n", PREFIX, SHMPREFIX, current->pid, shmid, addr);
@@ -938,7 +922,7 @@ static struct ftrace_hook hooks[] = {
 	HOOK("sys_semctl",  hook_sys_semctl,  &real_sys_semctl),
 	HOOK("sys_pipe",  hook_sys_pipe, &real_sys_pipe),
 	HOOK("sys_pipe2",  hook_sys_pipe2, &real_sys_pipe2),
-	HOOK("sys_close",  hook_sys_close, &real_sys_close),
+	// HOOK("sys_close",  hook_sys_close, &real_sys_close),
 	HOOK("sys_shmget",  hook_sys_shmget, &real_sys_shmget),
 	HOOK("sys_shmat",  hook_sys_shmat, &real_sys_shmat),
 	HOOK("sys_shmdt",  hook_sys_shmdt, &real_sys_shmdt),
