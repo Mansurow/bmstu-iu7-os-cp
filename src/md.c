@@ -27,7 +27,6 @@ MODULE_DESCRIPTION("MONITORING PROCCESS");
 MODULE_VERSION("1.0");
 
 #define MAINDIRNAME  "monitoring"
-#define LOGSDIRNAME  "logs"
 
 #define GENERALFILENAME  "general"
 #define SIGNALFILENAME   "signals"
@@ -39,10 +38,8 @@ MODULE_VERSION("1.0");
 #define MAPSFILENAME     "maps"
 
 static struct proc_dir_entry *proc_main_dir = NULL;
-static struct proc_dir_entry *proc_logs_dir = NULL;
 
 static struct proc_dir_entry *proc_general_file = NULL;
-static struct proc_dir_entry *proc_signal_logs_file = NULL;
 static struct proc_dir_entry *proc_signal_file = NULL;
 static struct proc_dir_entry *proc_sighand_file = NULL;
 static struct proc_dir_entry *proc_memory_file = NULL;
@@ -60,6 +57,7 @@ static char maps_info[LOG_SIZE] = { 0 };
 static char pipes_info[LOG_SIZE] = { 0 };
 static char sem_info[LOG_SIZE] = { 0 };
 static char shm_info[LOG_SIZE] = { 0 };
+static char signals[LOG_SIZE] = {0};
 
 static void print_page(struct page *page)
 {
@@ -115,35 +113,6 @@ static int walk_page_table(struct mm_struct *mm, unsigned long vaddr)
     pte_unmap(ptep);
     return 0;
 }    
-
-static void print_info_mm(pid_t pid, struct mm_struct *info_about_mem)
-{
-    if (info_about_mem == NULL)
-    {
-        pr_info("%s[Memory][%d]: нет доступа\n", PREFIX, pid);
-        return;
-    }
-
-    // struct vm_area_struct *vma = info_about_mem->mmap;
-
-    // unsigned long vaddr;
-    // int page_number = 0;
-
-    // for (; vma != NULL; vma = vma->vm_next)
-    // {
-    //     for (vaddr = vma->vm_start; vaddr < vma->vm_end; vaddr += PAGE_SIZE)
-    //     {
-    //         printk(KERN_INFO "%s[Memory][%d]: номер таблицы %d.\n",
-    //                PREFIX, pid, page_number++);
-
-    //         if (walk_page_table(info_about_mem, vaddr) != 0)
-    //         {
-    //             printk(KERN_INFO "%s[Memory][%d]: страница нет в таблице.\n",
-    //                    PREFIX, pid); 
-    //         }
-    //     }
-    // }
-}
 
 struct task_struct *find_task_struct(pid_t pid)
 {
@@ -207,27 +176,6 @@ static void cmd_to_str(char *cmdname, int cmd)
     }
 }
 
-static ssize_t show_general_info(void)
-{
-    int strlen = 0;
-
-    strlen += sprintf(general_info + strlen, "%7s %7s %7s %7s %10s %7s %7s %7s %7s %7s %14s %14s %14s %7s\n", 
-        "PPID", "PID", "STATE", "ESTATE", "FLAGS", "POLICY", "PRIO", "SPRIO", "NPRIO", "PRPRIO", "UTIME", "STIME", "DELAY", "COMM");
-
-    struct task_struct *task = &init_task;
-
-    do 
-    {
-        strlen += sprintf(general_info + strlen, "%7d %7d %7d %7d %10x %7d %7d %7d %7d %7d %14llu %14llu %14llu\t%s\n",
-                        task->parent->pid, task->pid, task->__state, task->exit_state, task->flags,
-                        task->policy, task->prio, task->static_prio, task->normal_prio, task->rt_priority,
-                        task->utime, task->stime, task->sched_info.run_delay,
-                        task->comm);  
-    }
-    while ((task = next_task(task)) != &init_task);
-
-    return strlen;
-} 
 
 static int general_open(struct inode *spInode, struct file *spFile)
 {
@@ -257,7 +205,22 @@ static ssize_t general_read(struct file *file, char __user *buf, size_t len, lof
     if (*fPos > 0)
         return 0;
 
-    ssize_t strlen  = show_general_info();
+    ssize_t strlen = 0;
+
+    strlen += sprintf(general_info + strlen, "%7s %7s %7s %7s %10s %7s %7s %7s %7s %7s %14s %14s %14s %7s\n", 
+        "PPID", "PID", "STATE", "ESTATE", "FLAGS", "POLICY", "PRIO", "SPRIO", "NPRIO", "PRPRIO", "UTIME", "STIME", "DELAY", "COMM");
+
+    struct task_struct *task = &init_task;
+
+    do 
+    {
+        strlen += sprintf(general_info + strlen, "%7d %7d %7d %7d %10x %7d %7d %7d %7d %7d %14llu %14llu %14llu\t%s\n",
+                        task->parent->pid, task->pid, task->__state, task->exit_state, task->flags,
+                        task->policy, task->prio, task->static_prio, task->normal_prio, task->rt_priority,
+                        task->utime, task->stime, task->sched_info.run_delay,
+                        task->comm);  
+    }
+    while ((task = next_task(task)) != &init_task);
 
     if (copy_to_user(buf, general_info, strlen))
     {
@@ -365,20 +328,27 @@ static ssize_t signal_logs_read(struct file *file, char __user *buf, size_t len,
     if (*fPos > 0)
         return 0;
 
-    ssize_t logLen = strlen(signal_logs);
+    ssize_t strlen = 0;
 
-    printk(KERN_INFO "%s: read called\n", PREFIX);
+    strlen += sprintf(signals + strlen, "%7s %10s %7s %7s\n", "PID", "SIGNAL", "SEND", "RECEIVE");
+    
+    signode *head = sig_info_list->head;
+    for (; head; head = head->next)
+    {
+        strlen += sprintf(signals + strlen, "%7d %10s %7d %7d\n",
+            head->info.pid, signal_names[head->info.sig], head->info.send_count, head->info.receive_count);
+    }
 
-    if (copy_to_user(buf, signal_logs, logLen))
+    if (copy_to_user(buf, signals, strlen))
     {
         printk(KERN_ERR "%s: copy_to_user error\n", PREFIX);
 
         return -EFAULT;
     }
 
-    *fPos += logLen;
+    *fPos += strlen;
 
-    return logLen;
+    return strlen;
 }
 
 
@@ -492,7 +462,7 @@ static ssize_t maps_read(struct file *file, char __user *buf, size_t len, loff_t
 
     ssize_t strlen = 0;
 
-    struct task_struct *task = find_task_struct(mt_pid);
+    struct task_struct *task = pid_task(find_vpid(mt_pid), PIDTYPE_PID);
 
     if (task == NULL || mt_pid == -1)
     {
@@ -511,23 +481,23 @@ static ssize_t maps_read(struct file *file, char __user *buf, size_t len, loff_t
         else
         {
             // 5.19.0 и меньше версия ядра, в 6+ убрали по причине оптимизации
-            struct vm_area_struct *vma = mm->mmap;
+            // struct vm_area_struct *vma = mm->mmap;
 
-            if (vma == NULL)
-            {
-                strlen += sprintf(maps_info + strlen, "%7d %20s %14s %14s %10s\n", task->pid, "?-?", "?", "?", "?");
-            }
-            else 
-            {
-                for (; vma != NULL; vma = vma->vm_next)
-                {
-                    unsigned long bytes = vma->vm_end - vma->vm_start;
-                    int pages = bytes / 4096;
+            // if (vma == NULL)
+            // {
+            //     strlen += sprintf(maps_info + strlen, "%7d %20s %14s %14s %10s\n", task->pid, "?-?", "?", "?", "?");
+            // }
+            // else 
+            // {
+            //     for (; vma != NULL; vma = vma->vm_next)
+            //     {
+            //         unsigned long bytes = vma->vm_end - vma->vm_start;
+            //         int pages = bytes / 4096;
 
-                    strlen += sprintf(maps_info + strlen, "%7d %10x-%10x %14ld %14lu %10d\n", 
-                        task->pid, vma->vm_start, vma->vm_end, vma->vm_flags, bytes, pages);
-                }
-            }
+            //         strlen += sprintf(maps_info + strlen, "%7d %10x-%10x %14ld %14lu %10d\n", 
+            //             task->pid, vma->vm_start, vma->vm_end, vma->vm_flags, bytes, pages);
+            //     }
+            // }
         }
     }
     
@@ -544,7 +514,6 @@ static ssize_t maps_read(struct file *file, char __user *buf, size_t len, loff_t
 
     return strlen;
 }
-
 
 static int pipe_open(struct inode *spInode, struct file *spFile)
 {
@@ -578,7 +547,7 @@ static ssize_t pipe_read(struct file *file, char __user *buf, size_t len, loff_t
 
     strlen += sprintf(pipes_info + strlen, "%7s %18s %7s\n", "PID", "FD", "COUNT");
     
-    pnode *head = pipe_info_list.head;
+    pnode *head = pipe_info_list->head;
 
     char temp[TEMP_STRING_SIZE] = { 0 };
 
@@ -587,12 +556,10 @@ static ssize_t pipe_read(struct file *file, char __user *buf, size_t len, loff_t
         int count = 0;
         ssize_t clen = 0;
 
-        // childnode_t *chead = head->children; 
-
         struct list_head *pos;
         struct task_struct *task, *curtask;
 
-        curtask = find_task_struct(head->ppid);
+        curtask = pid_task(find_vpid(head->ppid), PIDTYPE_PID);;
 
         if (curtask == NULL)
         {
@@ -612,12 +579,6 @@ static ssize_t pipe_read(struct file *file, char __user *buf, size_t len, loff_t
             count++;
         }
 
-        // for (; chead; chead = chead->next)
-        // {
-        //     clen += sprintf(temp + clen, "%d,", chead->pid);
-        //     count++;
-        // }
-
         strlen += sprintf(pipes_info + strlen, "%7d %18llu %7d %s\n",
             head->ppid, head->fd, count, temp);
 
@@ -631,7 +592,7 @@ static ssize_t pipe_read(struct file *file, char __user *buf, size_t len, loff_t
         return -EFAULT;
     }
 
-    // memset(pipes_info, 0, LOG_SIZE);
+    memset(pipes_info, 0, LOG_SIZE);
 
     *fPos += strlen;
 
@@ -819,11 +780,8 @@ static struct proc_ops shm_ops = {
 
 static void free_proc(void)
 {
-    if (proc_signal_logs_file != NULL)
-        remove_proc_entry(SIGNALFILENAME, proc_logs_dir);
-
-    if (proc_logs_dir != NULL)
-        remove_proc_entry(LOGSDIRNAME, proc_main_dir);
+    if (proc_signal_file != NULL)
+        remove_proc_entry(SIGNALFILENAME, proc_main_dir);
 
     if (proc_sighand_file != NULL)
         remove_proc_entry(SIGHANDFILENAME, proc_main_dir); 
@@ -852,10 +810,13 @@ static void free_proc(void)
 
 static void free_lists(void)
 {
-    free_plist(&pipe_info_list);
+    free_siglist(sig_info_list);
+    free_plist(pipe_info_list);
     free_semlist(sem_info_list);
     free_shmlist(shm_info_list);
 
+    kfree(sig_info_list);
+    kfree(pipe_info_list);
     kfree(sem_info_list);
     kfree(shm_info_list);
 }
@@ -919,14 +880,7 @@ static int init_proc(void)
         return -ENOMEM;
     }
 
-    if ((proc_logs_dir = proc_mkdir(LOGSDIRNAME, proc_main_dir)) == NULL)
-    {
-        printk(KERN_ERR "create main dir error\n");
-
-        return -ENOMEM;
-    }
-
-    if (!(proc_signal_logs_file = proc_create(SIGNALFILENAME, 0666, proc_logs_dir, &signal_logs_ops)))
+    if (!(proc_signal_file = proc_create(SIGNALFILENAME, 0666, proc_main_dir, &signal_logs_ops)))
     {
         printk(KERN_ERR "%s create signal logs file error\n", PREFIX);
 
@@ -938,6 +892,18 @@ static int init_proc(void)
 
 static int alloc_lists(void)
 {
+    sig_info_list = (siglist *) kmalloc(sizeof(siglist), GFP_KERNEL);
+    if(sig_info_list == NULL)
+    {
+        return -1;
+    }
+
+    pipe_info_list = (plist *) kmalloc(sizeof(plist), GFP_KERNEL);
+    if(pipe_info_list == NULL)
+    {
+        return -1;
+    }
+
     sem_info_list = (semlist *) kmalloc(sizeof(semlist), GFP_KERNEL);
     if (sem_info_list == NULL)
     {
@@ -950,7 +916,8 @@ static int alloc_lists(void)
         return -1;
     }
 
-
+    init_siglist(sig_info_list);
+    init_plist(pipe_info_list);
     init_semlist(sem_info_list);
     init_shmlist(shm_info_list);
 

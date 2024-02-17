@@ -1,17 +1,11 @@
 #include "hooks.h"
 
-extern char signal_logs[LOG_SIZE] = { 0 };
-
-extern plist pipe_info_list = { 
-    .len = 0,
-    .head = NULL,
-    .tail = NULL
-};
-
+extern siglist *sig_info_list = NULL;
+extern plist *pipe_info_list = NULL;
 extern semlist *sem_info_list = NULL;
 extern shmlist *shm_info_list = NULL;
 
-static DEFINE_SPINLOCK(signal_logs_lock);
+static DEFINE_SPINLOCK(signal_lock);
 static DEFINE_SPINLOCK(pipe_lock);
 static DEFINE_SPINLOCK(sem_lock);
 static DEFINE_SPINLOCK(shm_lock);
@@ -212,8 +206,58 @@ void fh_remove_hooks(struct ftrace_hook *hooks, size_t count)
 #endif
 
 // SYS_KILL
+void add_send_signal_static(int sig, int spid, int rpid)
+{
+	if (sig <= 0)
+	 	return;
+
+	spin_lock(&signal_lock);
+
+	signode *spid_node = get_signode(sig_info_list, spid);
+
+	if (spid_node == NULL)
+	{
+		siginfo data = {
+			.pid = spid,
+			.sig = sig,
+			.send_count = 1,
+			.receive_count = 0
+		};
+
+		push_back_siglist(sig_info_list, data);
+	} 
+	else
+	{
+		spid_node->info.send_count++;
+	}
+
+	signode *rpid_node = get_signode(sig_info_list, rpid);
+
+	if (rpid_node == NULL)
+	{
+		siginfo data = {
+			.pid = rpid,
+			.sig = sig,
+			.send_count = 0,
+			.receive_count = 1
+		};
+
+		push_back_siglist(sig_info_list, data);
+	} 
+	else
+	{
+		rpid_node->info.receive_count++;
+	}
+
+	spin_unlock(&signal_lock);
+
+	pr_info("%s%s: Process %d sent signal %s to process %d\n", PREFIX, SIGNALPREFIX, spid, signal_names[sig], rpid);
+	pr_info("%s%s: Process %d recieved signal %s\n", PREFIX, SIGNALPREFIX, rpid, signal_names[sig]);
+}
+
 #ifdef PTREGS_SYSCALL_STUBS
 static asmlinkage long (*real_sys_kill)(const struct pt_regs *);
+static asmlinkage long (*real_sys_tgkill)(const struct pt_regs *);
 
 static asmlinkage int hook_sys_kill(const struct pt_regs *regs)
 {
@@ -222,46 +266,52 @@ static asmlinkage int hook_sys_kill(const struct pt_regs *regs)
 	pid_t pid = regs->di;
 	int sig = regs->si;
 
-	if (res == 0 && sig > 0)
-	{
-		char currentString[TEMP_STRING_SIZE];
-		
-		memset(currentString, 0, TEMP_STRING_SIZE);	
-		snprintf(currentString, TEMP_STRING_SIZE, "Proccess %d sent signal %s to process %d\n", current->pid, signal_names[sig], pid);
-
-		spin_lock(&signal_logs_lock);
-
-		strcat(signal_logs, currentString); 
-
-		spin_unlock(&signal_logs_lock);
-
-		printk(KERN_INFO "%s%s: Process %d sent signal %s to process %d\n", PREFIX, SIGNALPREFIX, current->pid, signal_names[sig], pid);
-		
+	if (res == 0)
+	{		
+		add_send_signal_static(sig, current->pid, pid);
 	}
 
     return res;
 }
+
+static asmlinkage int hook_sys_tgkill(const struct pt_regs *regs)
+{
+    int res = real_sys_kill(regs);
+
+	pid_t pid = regs->si;
+	int sig = regs->dx;
+
+	if (res == 0)
+	{		
+		add_send_signal_static(sig, current->pid, pid);
+	}
+
+    return res;
+}
+
 #else
 static asmlinkage long (*real_sys_kill)(pid_t pid, int sig);
+static asmlinkage long (*real_sys_tgkill)(pid_t tgid, pid_t pid, int sig);
 
 static asmlinkage int hook_sys_kill(pid_t pid, int sig)
 {
     int res = real_sys_kill(pid, sig);
 
 	if (res == 0)
-	{
-		char currentString[TEMP_STRING_SIZE];
+	{		
+		add_send_signal_static(sig, current->pid, pid);
+	}
 
-		memset(currentString, 0, TEMP_STRING_SIZE);	
-		snprintf(currentString, TEMP_STRING_SIZE, "Proccess %d sent signal %s to process %d\n", current->pid, signal_names[sig], pid);
+    return res;
+}
 
-		spin_lock(&signal_logs_lock);
+static asmlinkage int hook_sys_tgkill(pid_t tgid, pid_t pid, int sig)
+{
+    int res = real_sys_tgkill(pid, sig);
 
-		strcat(signal_logs, currentString); 
-
-		spin_unlock(&signal_logs_lock);
-
-		pr_info("%s%s: Process %d sent signal %s to process %d\n", PREFIX, SIGNALPREFIX, current->pid, signal_names[sig], pid);
+	if (res == 0)
+	{		
+		add_send_signal_static(sig, current->pid, pid);
 	}
 
     return res;
@@ -276,17 +326,6 @@ static asmlinkage int hook_sys_signal(const struct pt_regs *regs)
 {
     pid_t sig = regs->di;
 
-    char currentString[TEMP_STRING_SIZE];
-
-    memset(currentString, 0, TEMP_STRING_SIZE);	
-	snprintf(currentString, TEMP_STRING_SIZE, "Proccess %d assign own handler for signal %s\n", current->pid, signal_names[sig]);
-
-	spin_lock(&signal_logs_lock);
-
-	strcat(signal_logs, currentString); 
-
-	spin_unlock(&signal_logs_lock);
-
 	printk(KERN_INFO "%s%s: Proccess %d assign own handler for signal %s\n", PREFIX, SIGNALPREFIX, current->pid, signal_names[sig]);
 
     real_sys_signal(regs);
@@ -300,19 +339,62 @@ static asmlinkage int hook_sys_signal(int sig, __sighandler_t handler);
 {
 	char currentString[TEMP_STRING_SIZE];
 
-    memset(currentString, 0, TEMP_STRING_SIZE);	
-	snprintf(currentString, TEMP_STRING_SIZE, "Proccess %d assign own handler for signal %s\n", current->pid, signal_names[sig]);
-
-	spin_lock(&signal_logs_lock);
-
-	strcat(signal_logs, currentString); 
-
-	spin_unlock(&signal_logs_lock);
-
-	printk(KERN_INFO "%s%s: Proccess %d assign own handler for signal %s\n", PREFIX, SIGNALPREFIX, current->pid, signal_names[sig]);
-
     real_sys_signal(sig, handler);
     return 0;
+}
+#endif
+
+// SIGNAL_COMPLETE_SIGNAL
+void add_recieved_signal_static(int sig, int rpid)
+{
+	if (sig <= 0)
+		return;
+
+	spin_lock(&signal_lock);
+
+	signode *rpid_node = get_signode(sig_info_list, rpid);
+
+	if (rpid_node == NULL)
+	{
+		siginfo data = {
+			.pid = rpid,
+			.sig = sig,
+			.send_count = 0,
+			.receive_count = 1
+		};
+
+		push_back_siglist(sig_info_list, data);
+	} 
+	else
+	{
+		rpid_node->info.receive_count++;
+	}
+
+	spin_unlock(&signal_lock);
+
+	pr_info("%s%s: Process %d recieved signal %s\n", PREFIX, SIGNALPREFIX, rpid, signal_names[sig]);
+}
+
+#ifdef PTREGS_SYSCALL_STUBS
+static void (*real_complete_signal)(const struct pt_regs *);
+
+static void hook_complete_signal(const struct pt_regs *regs)
+{
+	real_complete_signal(regs);
+
+    int sig = regs->di;
+	struct task_struct *t = regs->di;
+
+	add_recieved_signal_static(sig, t->pid);
+}
+#else
+static void (*real_complete_signal)(int sig, struct task_struct *p, enum pid_type type);
+
+static void hook_complete_signal(int sig, struct task_struct *p, enum pid_type type)
+{
+    real_complete_signal(sig, p, type);
+
+	add_recieved_signal_static(sig, t->pid);
 }
 #endif
 
@@ -504,9 +586,6 @@ static void update_semctl_info(int semid, int semnum, int cmd, unsigned long arg
 		} 
 	}
 	spin_unlock(&sem_lock);
-
-	pr_info("%s%s: Proccess %d semctl with %d semafore on semid %d, value: %d\n", PREFIX, SEMPREFIX, current->pid, semnum, semid, arg);
-
 }
 
 #ifdef PTREGS_SYSCALL_STUBS
@@ -522,7 +601,14 @@ static asmlinkage int hook_sys_semctl(const struct pt_regs *regs)
 	unsigned long arg = regs->r10;
 
 	if (res == 0)
+	{
 		update_semctl_info(semid, semnum, cmd, arg);
+		pr_info("%s%s: Proccess %d semctl with %d semafore on semid %d, value: %d\n", PREFIX, SEMPREFIX, current->pid, semnum, semid, arg);
+	}
+	else 
+	{
+		pr_err("%s%s: Proccess %d can't semctl with %d semafore on semid %d, value: %d\n", PREFIX, SEMPREFIX, current->pid, semnum, semid, arg);
+	}
 
     return res;
 }
@@ -534,7 +620,14 @@ static asmlinkage int hook_sys_semctl(int semid, int semnum, int cmd, unsigned l
     int res = real_sys_semctl(semid, semnum, cmd, arg);
 
 	if (res == 0)
+	{
 		update_semctl_info(semid, semnum, cmd, arg);
+		pr_info("%s%s: Proccess %d semctl with %d semafore on semid %d, value: %d\n", PREFIX, SEMPREFIX, current->pid, semnum, semid, arg);
+	}
+	else 
+	{
+		pr_err("%s%s: Proccess %d can't semctl with %d semafore on semid %d, value: %d\n", PREFIX, SEMPREFIX, current->pid, semnum, semid, arg);
+	}
 
     return res;
 }
@@ -545,11 +638,9 @@ static void get_pipe_info(int __user *fildes)
 {
 	spin_lock(&pipe_lock);
 
-	push_bask_plist(&pipe_info_list, current->pid, fildes, NULL);
+	push_bask_plist(pipe_info_list, current->pid, fildes);
 
 	spin_unlock(&pipe_lock);
-
-	pr_info("%s%s: Proccess %d create pipe fd: %p\n", PREFIX, PIPEPREFIX, current->pid, fildes);
 }
 
 #ifdef PTREGS_SYSCALL_STUBS
@@ -564,6 +655,11 @@ static asmlinkage int hook_sys_pipe(const struct pt_regs *regs)
 	if (res == 0)
 	{
 		get_pipe_info(fildes);
+		pr_info("%s%s: Proccess %d create pipe fd: %p\n", PREFIX, PIPEPREFIX, current->pid, fildes);
+	}
+	else 
+	{
+		pr_err("%s%s: Proccess %d can't create pipe fd: %p\n", PREFIX, PIPEPREFIX, current->pid, fildes);
 	}
 
     return res;
@@ -578,6 +674,11 @@ static asmlinkage int hook_sys_pipe(int __user *fildes)
 	if (res == 0)
 	{
 		get_pipe_info(fildes);
+		pr_info("%s%s: Proccess %d create pipe fd: %p\n", PREFIX, PIPEPREFIX, current->pid, fildes);
+	}
+	else 
+	{
+		pr_err("%s%s: Proccess %d can't create pipe fd: %p\n", PREFIX, PIPEPREFIX, current->pid, fildes);
 	}
 
     return res;
@@ -597,6 +698,11 @@ static asmlinkage int hook_sys_pipe2(const struct pt_regs *regs)
 	if (res == 0)
 	{
 		get_pipe_info(fildes);
+		pr_info("%s%s: Proccess %d create pipe2 fd: %p\n", PREFIX, PIPEPREFIX, current->pid, fildes);
+	}
+	else 
+	{
+		pr_err("%s%s: Proccess %d can't create pipe2 fd: %p\n", PREFIX, PIPEPREFIX, current->pid, fildes);
 	}
 
     return res;
@@ -611,6 +717,11 @@ static asmlinkage int hook_sys_pipe2(int __user *fildes, int flags)
 	if (res == 0)
 	{
 		get_pipe_info(fildes);
+		pr_info("%s%s: Proccess %d create pipe2 fd: %p\n", PREFIX, PIPEPREFIX, current->pid, fildes);
+	}
+	else 
+	{
+		pr_err("%s%s: Proccess %d can't create pipe2 fd: %p\n", PREFIX, PIPEPREFIX, current->pid, fildes);
 	}
 
     return res;
@@ -618,6 +729,14 @@ static asmlinkage int hook_sys_pipe2(int __user *fildes, int flags)
 #endif
 
 // SYS_CLOSE
+void update_pipe_info(pid_t pid, unsigned int *fd)
+{
+	spin_lock(&pipe_lock);
+
+	pop_plist(pipe_info_list, pid, fd);
+
+	spin_unlock(&pipe_lock);
+}
 #ifdef PTREGS_SYSCALL_STUBS
 static asmlinkage long (*real_sys_close)(const struct pt_regs *);
 
@@ -629,7 +748,12 @@ static asmlinkage int hook_sys_close(const struct pt_regs *regs)
 
 	if (res == 0)
 	{
-		pr_info("%s%s: Proccess %d close fd: %p\n", PREFIX, PIPEPREFIX, current->pid, fd);
+		update_pipe_info(current->pid, fd);
+		// pr_info("%s%s: Proccess %d close fd: %d\n", PREFIX, PIPEPREFIX, current->pid, fd);
+	}
+	else
+	{
+		// pr_info("%s%s: Proccess %d can't close fd: %d\n", PREFIX, PIPEPREFIX, current->pid, fd);
 	}
 
     return res;
@@ -643,7 +767,12 @@ static asmlinkage int hook_sys_close(unsigned int fd)
 
 	if (res == 0)
 	{
-		pr_info("%s%s: Proccess %d close fd: %p\n", PREFIX, PIPEPREFIX, current->pid, fd);
+		update_pipe_info(pid, fd);
+		pr_info("%s%s: Proccess %d close fd: %d\n", PREFIX, PIPEPREFIX, current->pid, fd);
+	}
+	else
+	{
+		pr_info("%s%s: Proccess %d can't close fd: %d\n", PREFIX, PIPEPREFIX, current->pid, fd);
 	}
 
     return res;
@@ -660,8 +789,7 @@ static void get_shm_info(int shmid, size_t size, int shmflg)
 		.shmid = shmid,
 		.size = size,
 		.addr = NULL,
-		.lastcmd = -1,
-		// .shmflg = shmflg
+		.lastcmd = -1
 	};
 
 	push_bask_shmlist(shm_info_list, info);
@@ -681,7 +809,7 @@ static asmlinkage int hook_sys_shmget(const struct pt_regs *regs)
 
 	if (shmid == -1)
 	{
-
+		pr_err("%s%s: Proccess %d can't create or get shm %d on %lu size\n", PREFIX, SHMPREFIX, current->pid, shmid, size);
 	}
 	else
 	{
@@ -700,7 +828,7 @@ static asmlinkage int hook_sys_shmget(key_t key, size_t size, int flag)
 
 	if (shmid == -1)
 	{
-
+		pr_err("%s%s: Proccess %d can't create or get shm %d on %lu size\n", PREFIX, SHMPREFIX, current->pid, shmid, size);
 	}
 	else
 	{
@@ -738,8 +866,7 @@ static void update_shmat_info(int shmid, char __user *shmaddr, int shmflg)
 			.shmid = shmid,
 			.size = 0,
 			.addr = shmaddr,
-			.lastcmd = -1,
-			// .shmflg = node->info.shmflg
+			.lastcmd = -1
 		};
 
 		push_bask_shmlist(shm_info_list, info);
@@ -760,7 +887,7 @@ static asmlinkage long hook_sys_shmat(const struct pt_regs *regs)
 
 	if (addr < 0)
 	{
-
+		pr_err("%s%s: Proccess %d wasn't attached to %d shm - addr - %lu\n", PREFIX, SHMPREFIX, current->pid, shmid, addr);
 	} 
 	else
 	{
@@ -777,9 +904,15 @@ static asmlinkage long hook_sys_shmat(int shmid, char __user *shmaddr, int shmfl
 {
 	long addr = real_sys_shmat(shmid, shmaddr, shmflg);	
 
-    unsigned long addr = real_sys_shmat(shmid, shmaddr, shmflg);
-
-	pr_info("%s%s: Proccess %d was attached to %d shm - addr: %lu\n", PREFIX, SHMPREFIX, current->pid, shmid, addr);
+    if (addr < 0)
+	{
+		pr_err("%s%s: Proccess %d wasn't attached to %d shm - addr - %lu\n", PREFIX, SHMPREFIX, current->pid, shmid, addr);
+	} 
+	else
+	{
+		update_shmat_info(shmid, addr, shmflg);
+		pr_info("%s%s: Proccess %d was attached to %d shm - addr - %lu\n", PREFIX, SHMPREFIX, current->pid, shmid, addr);
+	}
 
     return addr;
 }
@@ -811,7 +944,7 @@ static asmlinkage int hook_sys_shmdt(const struct pt_regs *regs)
 
 	if (res < 0)
 	{
-
+		pr_err("%s%s: Proccess %d wasn't detached shm - addr: %x\n", PREFIX, SHMPREFIX, current->pid, shmaddr);
 	}
 	else
 	{
@@ -831,7 +964,7 @@ static asmlinkage int real_sys_shmdt(char __user *shmaddr)
 
 	if (res < 0)
 	{
-
+		pr_err("%s%s: Proccess %d wasn't detached shm - addr: %x\n", PREFIX, SHMPREFIX, current->pid, shmaddr);
 	}
 	else
 	{
@@ -875,12 +1008,12 @@ static asmlinkage int hook_sys_shmctl(const struct pt_regs *regs)
 
 	if (res < 0)
 	{
-
+		pr_err("%s%s: Proccess %d wasn't shmctl %d shm, cmd: %d\n", PREFIX, SHMPREFIX, current->pid, shmid, cmd);
 	}
 	else
 	{
 		update_shmctl_info(shmid, cmd, buf);
-		pr_info("%s%s: Proccess %d was ctl %d shm, cmd: %d\n", PREFIX, SHMPREFIX, current->pid, shmid, cmd);
+		pr_info("%s%s: Proccess %d was shmctl %d shm, cmd: %d\n", PREFIX, SHMPREFIX, current->pid, shmid, cmd);
 	}
     return res;
 }
@@ -891,7 +1024,15 @@ static asmlinkage int real_sys_shmctl(int shmid, int cmd, struct shmid_ds __user
 {
     int res = real_sys_shmctl(shmid, cmd, buf);
 
-	pr_info("%s%s: Proccess %d was ctl %d shm, cmd: %d\n", PREFIX, SHMPREFIX, current->pid, shmid, cmd);
+	if (res < 0)
+	{
+		pr_err("%s%s: Proccess %d wasn't shmctl %d shm, cmd: %d\n", PREFIX, SHMPREFIX, current->pid, shmid, cmd);
+	}
+	else
+	{
+		update_shmctl_info(shmid, cmd, buf);
+		pr_info("%s%s: Proccess %d was shmctl %d shm, cmd: %d\n", PREFIX, SHMPREFIX, current->pid, shmid, cmd);
+	}
 
     return res;
 }
@@ -914,15 +1055,26 @@ static asmlinkage int real_sys_shmctl(int shmid, int cmd, struct shmid_ds __user
     .original = (_original),                    \
 }
 
+#define KHOOK(_name, _function, _original)   \
+{                                               \
+    .name = (_name),                \
+    .function = (_function),                    \
+    .original = (_original),                    \
+}
+
+
 static struct ftrace_hook hooks[] = {
     HOOK("sys_kill",  hook_sys_kill,  &real_sys_kill),
-	HOOK("sys_signal",  hook_sys_signal,  &real_sys_signal),
+	HOOK("sys_tkill",  hook_sys_kill,  &real_sys_kill),
+	HOOK("sys_tgkill",  hook_sys_tgkill,  &real_sys_tgkill),
+	// KHOOK("complete_signal", hook_complete_signal, &real_complete_signal),
+	// HOOK("sys_signal",  hook_sys_signal,  &real_sys_signal),
 	HOOK("sys_semget",  hook_sys_semget,  &real_sys_semget),
   	HOOK("sys_semop",  hook_sys_semop,  &real_sys_semop),
 	HOOK("sys_semctl",  hook_sys_semctl,  &real_sys_semctl),
-	HOOK("sys_pipe",  hook_sys_pipe, &real_sys_pipe),
+	// HOOK("sys_pipe",  hook_sys_pipe, &real_sys_pipe),
 	HOOK("sys_pipe2",  hook_sys_pipe2, &real_sys_pipe2),
-	// HOOK("sys_close",  hook_sys_close, &real_sys_close),
+	HOOK("sys_close",  hook_sys_close, &real_sys_close),
 	HOOK("sys_shmget",  hook_sys_shmget, &real_sys_shmget),
 	HOOK("sys_shmat",  hook_sys_shmat, &real_sys_shmat),
 	HOOK("sys_shmdt",  hook_sys_shmdt, &real_sys_shmdt),
